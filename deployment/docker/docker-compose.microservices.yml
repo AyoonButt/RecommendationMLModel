@@ -1,0 +1,154 @@
+version: '3.8'
+
+services:
+  # Core Recommendations Service (Port 5000)
+  core-recommendations:
+    build:
+      context: ../..
+      dockerfile: deployment/docker/Dockerfile.core-recommendations
+    container_name: core-recommendations-service
+    ports:
+      - "5000:5000"
+    environment:
+      - PORT=5000
+      - DEBUG=false
+      - SPRING_API_URL=http://host.docker.internal:8080
+      - SOCIAL_SERVICE_URL=http://social-recommendations:8081
+      - COMMENT_SERVICE_URL=http://comment-analysis:8080
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - LOCAL_DEV=false
+      - USER_FEATURE_DIM=64
+      - POST_FEATURE_DIM=64
+      - EMBEDDING_DIM=32
+      - HIDDEN_DIMS=128,64
+      - MODEL_DIR=/app/model_checkpoints
+      - SERVICE_VERSION=1.0.0
+    volumes:
+      - ../../model_checkpoints:/app/model_checkpoints
+      - ../../logs:/app/logs
+    depends_on:
+      - redis
+    networks:
+      - recommendation-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Social Recommendations Service (Port 8081)
+  social-recommendations:
+    build:
+      context: ../..
+      dockerfile: deployment/docker/Dockerfile.social-recommendations
+    container_name: social-recommendations-service
+    ports:
+      - "8081:8081"
+    environment:
+      - PORT=8081
+      - DEBUG=false
+      - SPRING_API_URL=http://host.docker.internal:8080
+      - COMMENT_ANALYSIS_SERVICE_URL=http://comment-analysis:8080
+      - CORE_RECOMMENDATIONS_SERVICE_URL=http://core-recommendations:5000
+      - FOLLOWING_WEIGHT=0.4
+      - COMMUNITY_WEIGHT=0.3
+      - SENTIMENT_WEIGHT=0.3
+      - MAX_FOLLOWING_USERS=50
+      - CACHE_TTL=1800
+      - SERVICE_VERSION=1.0.0
+    volumes:
+      - ../../logs:/app/logs
+    depends_on:
+      - comment-analysis
+    networks:
+      - recommendation-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Comment Analysis Service (Port 8080)
+  comment-analysis:
+    build:
+      context: ../..
+      dockerfile: deployment/docker/Dockerfile.comment-analysis
+    container_name: comment-analysis-service
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - DEBUG=false
+      - SPRING_API_URL=http://host.docker.internal:8080
+      - BERT_MODEL=nlptown/bert-base-multilingual-uncased-sentiment
+      - SENTIMENT_CACHE_SIZE=2000
+      - CACHE_TTL=7200
+      - SERVICE_VERSION=1.0.0
+    volumes:
+      - ../../logs:/app/logs
+      - ../../models:/app/models  # For cached BERT models
+    networks:
+      - recommendation-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: recommendation-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - recommendation-network
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 1gb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Nginx Load Balancer (Optional)
+  nginx:
+    image: nginx:alpine
+    container_name: recommendation-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/ssl:/etc/nginx/ssl
+      - ../../logs/nginx:/var/log/nginx
+    depends_on:
+      - core-recommendations
+      - social-recommendations
+      - comment-analysis
+    networks:
+      - recommendation-network
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+    driver: local
+
+networks:
+  recommendation-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

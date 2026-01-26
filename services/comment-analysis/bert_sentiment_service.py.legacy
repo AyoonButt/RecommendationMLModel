@@ -1,0 +1,277 @@
+#!/usr/bin/env python3
+"""
+BERT Sentiment Analysis Service
+A lightweight Flask service for sentiment analysis using BERT
+"""
+
+from flask import Flask, request, jsonify
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipeline
+import torch
+import logging
+import time
+from functools import lru_cache
+import os
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = Flask(__name__)
+
+# Configuration
+MODEL_NAME = os.getenv('BERT_MODEL', 'nlptown/bert-base-multilingual-uncased-sentiment')
+MAX_LENGTH = 512
+BATCH_SIZE = 8
+CACHE_SIZE = 1000
+
+class SentimentAnalyzer:
+    def __init__(self):
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        logger.info(f"Using device: {self.device}")
+        
+        try:
+            # Load pre-trained model and tokenizer
+            logger.info(f"Loading model: {MODEL_NAME}")
+            self.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+            self.model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME)
+            self.model.to(self.device)
+            self.model.eval()
+            
+            # Create pipeline for easier inference
+            self.classifier = pipeline(
+                "sentiment-analysis",
+                model=self.model,
+                tokenizer=self.tokenizer,
+                device=0 if torch.cuda.is_available() else -1,
+                return_all_scores=True
+            )
+            
+            logger.info("Model loaded successfully")
+            
+        except Exception as e:
+            logger.error(f"Error loading model: {e}")
+            raise
+    
+    @lru_cache(maxsize=CACHE_SIZE)
+    def analyze_cached(self, text):
+        """Cached analysis for repeated texts"""
+        return self.analyze(text)
+    
+    def analyze(self, text):
+        """Analyze sentiment of a single text"""
+        try:
+            if not text or len(text.strip()) < 3:
+                return self._default_response()
+            
+            # Truncate text if too long
+            text = text[:MAX_LENGTH]
+            
+            # Get prediction
+            start_time = time.time()
+            results = self.classifier(text)
+            inference_time = time.time() - start_time
+            
+            # Process results (assuming 3-class sentiment: negative, neutral, positive)
+            scores = {result['label'].lower(): result['score'] for result in results[0]}
+            
+            # Map labels to our format
+            positive_score = scores.get('positive', scores.get('pos', 0.0))
+            negative_score = scores.get('negative', scores.get('neg', 0.0))
+            neutral_score = scores.get('neutral', 1.0 - positive_score - negative_score)
+            
+            # Determine overall sentiment
+            max_score = max(positive_score, negative_score, neutral_score)
+            if max_score == positive_score:
+                sentiment = "POSITIVE"
+            elif max_score == negative_score:
+                sentiment = "NEGATIVE"
+            else:
+                sentiment = "NEUTRAL"
+            
+            return {
+                "sentiment": sentiment,
+                "confidence": float(max_score),
+                "scores": [float(positive_score), float(negative_score), float(neutral_score)],
+                "inference_time": inference_time
+            }
+            
+        except Exception as e:
+            logger.error(f"Error analyzing text: {e}")
+            return self._default_response()
+    
+    def analyze_batch(self, texts):
+        """Analyze sentiment of multiple texts"""
+        try:
+            if not texts:
+                return []
+            
+            # Filter and truncate texts
+            processed_texts = []
+            for text in texts:
+                if text and len(text.strip()) >= 3:
+                    processed_texts.append(text[:MAX_LENGTH])
+                else:
+                    processed_texts.append("")
+            
+            start_time = time.time()
+            
+            # Process in batches to avoid memory issues
+            results = []
+            for i in range(0, len(processed_texts), BATCH_SIZE):
+                batch = processed_texts[i:i + BATCH_SIZE]
+                batch_results = self.classifier(batch)
+                results.extend(batch_results)
+            
+            inference_time = time.time() - start_time
+            
+            # Process results
+            processed_results = []
+            for i, result in enumerate(results):
+                if not processed_texts[i]:
+                    processed_results.append(self._default_response())
+                    continue
+                
+                scores = {r['label'].lower(): r['score'] for r in result}
+                
+                positive_score = scores.get('positive', scores.get('pos', 0.0))
+                negative_score = scores.get('negative', scores.get('neg', 0.0))
+                neutral_score = scores.get('neutral', 1.0 - positive_score - negative_score)
+                
+                max_score = max(positive_score, negative_score, neutral_score)
+                if max_score == positive_score:
+                    sentiment = "POSITIVE"
+                elif max_score == negative_score:
+                    sentiment = "NEGATIVE"
+                else:
+                    sentiment = "NEUTRAL"
+                
+                processed_results.append({
+                    "sentiment": sentiment,
+                    "confidence": float(max_score),
+                    "scores": [float(positive_score), float(negative_score), float(neutral_score)]
+                })
+            
+            logger.info(f"Batch analysis completed: {len(texts)} texts in {inference_time:.3f}s")
+            return processed_results
+            
+        except Exception as e:
+            logger.error(f"Error in batch analysis: {e}")
+            return [self._default_response() for _ in texts]
+    
+    def _default_response(self):
+        """Default response for errors or invalid input"""
+        return {
+            "sentiment": "NEUTRAL",
+            "confidence": 0.5,
+            "scores": [0.33, 0.33, 0.34]
+        }
+
+# Initialize analyzer
+try:
+    analyzer = SentimentAnalyzer()
+except Exception as e:
+    logger.error(f"Failed to initialize sentiment analyzer: {e}")
+    analyzer = None
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    if analyzer is None:
+        return jsonify({"status": "error", "message": "Model not loaded"}), 500
+    return jsonify({"status": "healthy", "model": MODEL_NAME})
+
+@app.route('/analyze', methods=['POST'])
+def analyze_sentiment():
+    """Analyze sentiment for a single text"""
+    try:
+        if analyzer is None:
+            return jsonify({"error": "Model not available"}), 500
+        
+        data = request.get_json()
+        if not data or 'text' not in data:
+            return jsonify({"error": "Missing 'text' field"}), 400
+        
+        text = data['text']
+        result = analyzer.analyze_cached(text)
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        logger.error(f"Error in analyze endpoint: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+@app.route('/analyze/batch', methods=['POST'])
+def analyze_batch():
+    """Analyze sentiment for multiple texts"""
+    try:
+        if analyzer is None:
+            return jsonify({"error": "Model not available"}), 500
+        
+        data = request.get_json()
+        if not data or 'texts' not in data:
+            return jsonify({"error": "Missing 'texts' field"}), 400
+        
+        texts = data['texts']
+        if not isinstance(texts, list):
+            return jsonify({"error": "'texts' must be a list"}), 400
+        
+        if len(texts) > 100:
+            return jsonify({"error": "Maximum 100 texts allowed per batch"}), 400
+        
+        results = analyzer.analyze_batch(texts)
+        
+        return jsonify({"results": results})
+        
+    except Exception as e:
+        logger.error(f"Error in batch analyze endpoint: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+@app.route('/cache/clear', methods=['POST'])
+def clear_cache():
+    """Clear the analysis cache"""
+    try:
+        if analyzer:
+            analyzer.analyze_cached.cache_clear()
+        return jsonify({"message": "Cache cleared successfully"})
+    except Exception as e:
+        logger.error(f"Error clearing cache: {e}")
+        return jsonify({"error": "Error clearing cache"}), 500
+
+@app.route('/cache/info', methods=['GET'])
+def cache_info():
+    """Get cache information"""
+    try:
+        if analyzer:
+            info = analyzer.analyze_cached.cache_info()
+            return jsonify({
+                "hits": info.hits,
+                "misses": info.misses,
+                "maxsize": info.maxsize,
+                "currsize": info.currsize
+            })
+        return jsonify({"error": "Analyzer not available"}), 500
+    except Exception as e:
+        logger.error(f"Error getting cache info: {e}")
+        return jsonify({"error": "Error getting cache info"}), 500
+
+@app.route('/', methods=['GET'])
+def root():
+    """Root endpoint with service information"""
+    return jsonify({
+        "service": "BERT Sentiment Analysis",
+        "model": MODEL_NAME,
+        "endpoints": {
+            "health": "/health",
+            "analyze": "/analyze",
+            "batch_analyze": "/analyze/batch",
+            "clear_cache": "/cache/clear",
+            "cache_info": "/cache/info"
+        }
+    })
+
+if __name__ == '__main__':
+    port = int(os.getenv('PORT', 8080))
+    debug = os.getenv('DEBUG', 'false').lower() == 'true'
+    
+    logger.info(f"Starting BERT Sentiment Analysis Service on port {port}")
+    app.run(host='0.0.0.0', port=port, debug=debug)

@@ -18,7 +18,7 @@ class UserSeenCache:
         Args:
             api_base_url: Base URL for the API that provides user history
             redis_client: An existing Redis client instance (preferred)
-            api_auth: Authentication tuple for API requests (if needed)
+            api_auth: Authentmaication tuple for API requests (if needed)
         """
         # Use provided Redis client or create a new one using environment variables
         if redis_client:

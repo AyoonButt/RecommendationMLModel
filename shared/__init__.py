@@ -1,0 +1,1 @@
+# Shared components for recommendation system microservices

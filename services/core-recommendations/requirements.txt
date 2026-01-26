@@ -1,0 +1,6 @@
+flask==2.3.3
+numpy==1.24.3
+redis==4.6.0
+requests==2.31.0
+tensorflow==2.13.0
+python-dotenv==1.0.0

@@ -6,6 +6,10 @@ import json
 import logging
 from datetime import datetime
 
+# Import social signal processor and content filter
+from SocialSignalProcessor import SocialSignalProcessor, InteractionType
+from ContentFilter import ContentFilter, create_content_filter
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -47,6 +51,184 @@ def compute_scores(user_embeddings: np.ndarray, post_embeddings: np.ndarray,
         return enhanced_scores
 
     return base_scores
+
+
+def compute_socially_enhanced_scores(user_embeddings: np.ndarray, 
+                                   post_embeddings: np.ndarray,
+                                   user_id: int,
+                                   post_ids: List[int],
+                                   social_processor: SocialSignalProcessor,
+                                   content_type: str = "posts",
+                                   candidates: List[Dict] = None) -> tuple[np.ndarray, Dict[str, Any]]:
+    """
+    Compute socially enhanced similarity scores using social signals and sentiment analysis.
+
+    Args:
+        user_embeddings: User embedding vectors of shape (batch_size, embedding_dim)
+        post_embeddings: Post embedding vectors of shape (num_posts, embedding_dim)
+        user_id: User ID for social signal processing
+        post_ids: List of post IDs corresponding to post embeddings
+        social_processor: Social signal processor instance
+        content_type: Type of content being scored ("posts" or "trailers")
+        candidates: List of candidate metadata for score enhancement
+
+    Returns:
+        Tuple of (enhanced_scores, metadata)
+    """
+    try:
+        # Get base scores first
+        base_scores = compute_scores(user_embeddings, post_embeddings, content_type, candidates)
+        
+        # Apply social enhancement if user_id is provided
+        if user_id and social_processor:
+            logger.info(f"Applying social enhancement for user {user_id}")
+            
+            # Use social processor to enhance scores
+            enhanced_scores, social_metadata = social_processor.process_social_boost(
+                user_id=user_id,
+                post_ids=post_ids,
+                user_embedding=user_embeddings[0] if user_embeddings.shape[0] > 0 else user_embeddings,
+                post_embeddings=post_embeddings
+            )
+            
+            # Ensure scores are properly shaped
+            if enhanced_scores.ndim == 1:
+                enhanced_scores = enhanced_scores.reshape(1, -1)
+            
+            return enhanced_scores, social_metadata
+        else:
+            logger.info("No social enhancement applied - using base scores")
+            return base_scores, {"social_enhancement": False}
+            
+    except Exception as e:
+        logger.error(f"Error in socially enhanced scoring: {e}")
+        # Fallback to base scores
+        base_scores = compute_scores(user_embeddings, post_embeddings, content_type, candidates)
+        return base_scores, {"error": str(e), "fallback": True}
+
+
+def compute_dual_preference_scores(user_embeddings: np.ndarray,
+                                 post_embeddings: np.ndarray,
+                                 user_id: int,
+                                 post_ids: List[int],
+                                 positive_interactions: List[int] = None,
+                                 negative_interactions: List[int] = None,
+                                 content_type: str = "posts") -> np.ndarray:
+    """
+    Compute scores with dual preference boosting (likes/saves vs not interested).
+
+    Args:
+        user_embeddings: User embedding vectors
+        post_embeddings: Post embedding vectors  
+        user_id: User ID
+        post_ids: List of post IDs
+        positive_interactions: List of post IDs with positive interactions
+        negative_interactions: List of post IDs with negative interactions
+        content_type: Type of content
+
+    Returns:
+        Dual preference enhanced scores
+    """
+    try:
+        # Get base scores
+        base_scores = compute_scores(user_embeddings, post_embeddings, content_type)
+        
+        if base_scores.ndim == 1:
+            base_scores = base_scores.reshape(1, -1)
+        
+        enhanced_scores = base_scores.copy()
+        
+        # Apply positive boosts
+        if positive_interactions:
+            positive_set = set(positive_interactions)
+            for i, post_id in enumerate(post_ids):
+                if post_id in positive_set and i < enhanced_scores.shape[1]:
+                    # Boost score for positive interactions
+                    enhanced_scores[0, i] *= 1.2  # 20% boost
+        
+        # Apply negative penalties
+        if negative_interactions:
+            negative_set = set(negative_interactions)
+            for i, post_id in enumerate(post_ids):
+                if post_id in negative_set and i < enhanced_scores.shape[1]:
+                    # Penalize score for negative interactions
+                    enhanced_scores[0, i] *= 0.7  # 30% penalty
+        
+        # Clamp scores to valid range
+        enhanced_scores = np.clip(enhanced_scores, 0.0, 1.0)
+        
+        logger.info(f"Applied dual preference boosting for user {user_id}")
+        return enhanced_scores
+        
+    except Exception as e:
+        logger.error(f"Error in dual preference scoring: {e}")
+        return compute_scores(user_embeddings, post_embeddings, content_type)
+
+
+def compute_filtered_scores(user_embeddings: np.ndarray,
+                          post_embeddings: np.ndarray,
+                          user_id: int,
+                          post_ids: List[int],
+                          content_filter: ContentFilter,
+                          content_type: str = "posts",
+                          apply_social_boost: bool = True,
+                          social_processor: SocialSignalProcessor = None) -> tuple[np.ndarray, List[int], Dict[str, Any]]:
+    """
+    Compute recommendation scores with content filtering applied.
+    
+    Args:
+        user_embeddings: User embedding vectors
+        post_embeddings: Post embedding vectors
+        user_id: User ID
+        post_ids: List of post IDs
+        content_filter: Content filter instance
+        content_type: Type of content
+        apply_social_boost: Whether to apply social boosting
+        social_processor: Social signal processor instance
+        
+    Returns:
+        Tuple of (filtered_scores, filtered_post_ids, filter_metadata)
+    """
+    try:
+        # Get base scores
+        if apply_social_boost and social_processor:
+            base_scores, social_metadata = compute_socially_enhanced_scores(
+                user_embeddings, post_embeddings, user_id, post_ids, 
+                social_processor, content_type
+            )
+            if base_scores.ndim > 1:
+                base_scores = base_scores.flatten()
+        else:
+            base_scores = compute_scores(user_embeddings, post_embeddings, content_type)
+            if base_scores.ndim > 1:
+                base_scores = base_scores.flatten()
+            social_metadata = {"social_enhancement": False}
+        
+        # Apply content filtering
+        filtered_post_ids, filtered_scores, filter_metadata = content_filter.filter_recommendations(
+            user_id=user_id,
+            post_ids=post_ids,
+            scores=base_scores,
+            apply_user_preferences=True
+        )
+        
+        # Combine metadata
+        combined_metadata = {
+            **social_metadata,
+            **filter_metadata,
+            "content_filtering_applied": True
+        }
+        
+        logger.info(f"Applied content filtering: {len(post_ids)} -> {len(filtered_post_ids)} posts for user {user_id}")
+        return filtered_scores, filtered_post_ids, combined_metadata
+        
+    except Exception as e:
+        logger.error(f"Error in filtered scoring: {e}")
+        # Return original data if filtering fails
+        base_scores = compute_scores(user_embeddings, post_embeddings, content_type)
+        if base_scores.ndim > 1:
+            base_scores = base_scores.flatten()
+        return base_scores, post_ids, {"error": str(e), "content_filtering_applied": False}
 
 
 def _apply_candidate_boosts(scores: np.ndarray, candidates: List[Dict], content_type: str) -> np.ndarray:

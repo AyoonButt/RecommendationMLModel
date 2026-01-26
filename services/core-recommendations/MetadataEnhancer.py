@@ -35,7 +35,8 @@ class MetadataEnhancer:
         self.language_boost_factor = 0.3  # Up to 30% boost for language preferences
         self.genre_boost_factor = 0.2  # Up to 20% boost for genre preferences
         self.popularity_boost_factor = 0.15  # Up to 15% boost for popular content
-        self.recency_boost_factor = 0.1  # Up to 10% boost for recent content
+        self.recency_boost_factor = 0.25  # Enhanced: Up to 25% boost for recent content
+        self.cast_crew_boost_factor = 0.20  # NEW: Up to 20% boost for cast/crew preferences
 
     def enhance_scores(self, user_id: str, post_ids: List[int], base_scores: np.ndarray,
                        candidates: List[Dict] = None, content_type: str = "posts") -> np.ndarray:
@@ -71,6 +72,11 @@ class MetadataEnhancer:
 
                 # Apply demographic boosting (region-based)
                 enhanced_scores = self._apply_demographic_boosting(
+                    enhanced_scores, post_ids, user_metadata
+                )
+
+                # Apply cast/crew preference boosting (NEW)
+                enhanced_scores = self._apply_cast_crew_boosting(
                     enhanced_scores, post_ids, user_metadata
                 )
 
@@ -202,6 +208,114 @@ class MetadataEnhancer:
             logger.warning(f"Error applying demographic boosting: {e}")
             return scores
 
+    def _apply_cast_crew_boosting(self, scores: np.ndarray, post_ids: List[int],
+                                  user_metadata: Dict) -> np.ndarray:
+        """Apply cast/crew preference boosting to scores based on user's actor/director preferences."""
+        try:
+            # Extract user cast/crew preferences from metadata
+            cast_crew_prefs = user_metadata.get('castCrewPreferences', {})
+            if not cast_crew_prefs or cast_crew_prefs.get('error'):
+                return scores
+
+            # Get user's cast and crew preferences
+            cast_preferences = cast_crew_prefs.get('castPreferences', {})
+            crew_preferences = cast_crew_prefs.get('crewPreferences', {})
+            
+            if not cast_preferences and not crew_preferences:
+                return scores
+
+            enhanced_scores = scores.copy()
+
+            # Apply cast/crew boosting for each post
+            for i, post_id in enumerate(post_ids):
+                post_metadata = self._get_cached_metadata(f"post:{post_id}")
+                if not post_metadata:
+                    continue
+
+                # Get post cast/crew appeal scores from API
+                cast_crew_appeal = post_metadata.get('castCrewAppealScores', {})
+                if not cast_crew_appeal:
+                    continue
+
+                # Use the combined appeal score from the API
+                combined_appeal = cast_crew_appeal.get('combinedAppealScore', 0.5)
+                
+                # Calculate user-specific cast/crew alignment
+                user_alignment = self._calculate_user_cast_crew_alignment(
+                    post_metadata, cast_preferences, crew_preferences
+                )
+                
+                # Combine content appeal with user alignment
+                # Content appeal (50%) + User alignment (50%)
+                final_cast_crew_score = (combined_appeal * 0.5) + (user_alignment * 0.5)
+                
+                # Apply boost based on the final score
+                if final_cast_crew_score > 0.5:  # Only boost if above neutral
+                    boost_factor = 1.0 + ((final_cast_crew_score - 0.5) * 2.0 * self.cast_crew_boost_factor)
+                    enhanced_scores[i] *= boost_factor
+
+            return enhanced_scores
+
+        except Exception as e:
+            logger.warning(f"Error applying cast/crew boosting: {e}")
+            return scores
+
+    def _calculate_user_cast_crew_alignment(self, post_metadata: Dict, 
+                                           cast_preferences: Dict, crew_preferences: Dict) -> float:
+        """Calculate how well a post's cast/crew aligns with user preferences."""
+        try:
+            total_alignment = 0.0
+            total_weight = 0.0
+            
+            # Check cast alignment
+            post_cast = post_metadata.get('cast', [])
+            if post_cast and cast_preferences:
+                for cast_member in post_cast:
+                    person_id = str(cast_member.get('id', ''))
+                    if person_id in cast_preferences:
+                        user_pref = cast_preferences[person_id]
+                        pref_score = user_pref.get('score', 0.0) if isinstance(user_pref, dict) else float(user_pref)
+                        
+                        # Weight by cast member's order (main cast gets higher weight)
+                        order_weight = max(0.1, 1.0 - (cast_member.get('orderIndex', 0) * 0.1))
+                        
+                        total_alignment += pref_score * order_weight
+                        total_weight += order_weight
+            
+            # Check crew alignment (directors, writers, etc.)
+            post_crew = post_metadata.get('crew', {})
+            if post_crew and crew_preferences:
+                # Check different crew roles
+                for role, crew_members in post_crew.items():
+                    if isinstance(crew_members, list):
+                        # Weight different roles differently
+                        role_weight = {
+                            'director': 1.0,
+                            'creator': 0.9,
+                            'writer': 0.8,
+                            'executive producer': 0.6,
+                            'producer': 0.5
+                        }.get(role.lower(), 0.3)
+                        
+                        for crew_member in crew_members:
+                            person_id = str(crew_member.get('id', ''))
+                            if person_id in crew_preferences:
+                                user_pref = crew_preferences[person_id]
+                                pref_score = user_pref.get('score', 0.0) if isinstance(user_pref, dict) else float(user_pref)
+                                
+                                total_alignment += pref_score * role_weight
+                                total_weight += role_weight
+            
+            # Return normalized alignment score
+            if total_weight > 0:
+                return min(1.0, total_alignment / total_weight)
+            else:
+                return 0.5  # Neutral if no alignment data
+                
+        except Exception as e:
+            logger.warning(f"Error calculating cast/crew alignment: {e}")
+            return 0.5
+
     def _apply_content_boosting(self, scores: np.ndarray, post_ids: List[int],
                                 content_type: str) -> np.ndarray:
         """Apply content-specific boosting (popularity, recency, etc.)."""
@@ -227,8 +341,12 @@ class MetadataEnhancer:
                         engagement_boost = 1.0 + min(0.1, click_count / 1000.0)  # Up to 10% boost
                         enhanced_scores[i] *= engagement_boost
 
-                # Apply recency boosting for new content
-                # (This would require release date analysis)
+                # Apply enhanced recency boosting (NEW: from API metadata)
+                recency_boost = post_metadata.get('recencyBoost', 1.0)
+                if isinstance(recency_boost, (int, float)) and recency_boost != 1.0:
+                    # Apply recency boost with our factor
+                    adjusted_recency_boost = 1.0 + ((recency_boost - 1.0) * self.recency_boost_factor)
+                    enhanced_scores[i] *= adjusted_recency_boost
 
             return enhanced_scores
 
@@ -297,13 +415,21 @@ class MetadataEnhancer:
             entity_type, entity_id = parts
 
             if entity_type == 'user':
-                url = f"{self.api_base_url}/api/recommendations/users/{entity_id}/metadata"
+                url = f"{self.api_base_url}/api/internal/users/{entity_id}/metadata"
             elif entity_type == 'post':
-                url = f"{self.api_base_url}/api/recommendations/posts/{entity_id}/metadata"
+                url = f"{self.api_base_url}/api/internal/posts/{entity_id}/metadata"
             else:
                 return None
 
-            response = requests.get(url, timeout=5)
+            # Add service authentication headers
+            headers = {}
+            import os
+            auth_token = os.environ.get('SERVICE_AUTH_TOKEN', '')
+            if auth_token:
+                headers['Authorization'] = f'Bearer {auth_token}'
+                headers['X-Service-Role'] = 'SERVICE'
+
+            response = requests.get(url, headers=headers, timeout=5)
 
             if response.status_code == 200:
                 return response.json()
@@ -344,7 +470,21 @@ class MetadataEnhancer:
                 "language": self.language_boost_factor,
                 "genre": self.genre_boost_factor,
                 "popularity": self.popularity_boost_factor,
-                "recency": self.recency_boost_factor
+                "recency": self.recency_boost_factor,
+                "cast_crew": self.cast_crew_boost_factor
+            }
+        }
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get statistics compatible with RL integration interface."""
+        enhancement_stats = self.get_enhancement_stats()
+        return {
+            "cache_size": enhancement_stats["cache_size"],
+            "boost_factors": enhancement_stats["boost_factors"],
+            "rl_enhancement": {
+                "enabled": False,
+                "mode": "metadata_only",
+                "message": "Standard metadata enhancement active"
             }
         }
 
