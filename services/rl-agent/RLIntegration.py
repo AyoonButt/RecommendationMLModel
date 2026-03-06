@@ -35,11 +35,11 @@ class RLIntegrationManager:
     def __init__(self, config: Dict[str, Any] = None):
         """
         Initialize the RL integration manager.
-        
+
         Args:
-            config: Configuration dictionary
+            config: Configuration dictionary (merged with defaults)
         """
-        self.config = config or self._get_default_config()
+        self.config = self._merge_config(config)
         
         # Initialize RL components
         self.experience_collector = RLExperienceCollector(
@@ -117,6 +117,32 @@ class RLIntegrationManager:
                 'fallback_enabled': True
             }
         }
+
+    def _merge_config(self, config: Dict[str, Any] = None) -> Dict[str, Any]:
+        """Merge provided config with defaults to ensure all required fields exist."""
+        defaults = self._get_default_config()
+
+        if config is None:
+            return defaults
+
+        # Deep merge config with defaults
+        merged = {}
+        all_keys = set(defaults.keys()) | set(config.keys())
+
+        for key in all_keys:
+            if key in defaults and key in config:
+                if isinstance(defaults[key], dict) and isinstance(config[key], dict):
+                    # Recursively merge nested dicts
+                    merged[key] = {**defaults[key], **config[key]}
+                else:
+                    # Use provided value
+                    merged[key] = config[key]
+            elif key in defaults:
+                merged[key] = defaults[key]
+            else:
+                merged[key] = config[key]
+
+        return merged
     
     def enhance_recommendations(self, user_id: int, candidate_posts: List[Dict[str, Any]], 
                               context: Dict[str, Any]) -> RLRecommendationResult:

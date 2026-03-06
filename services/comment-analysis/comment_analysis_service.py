@@ -2,7 +2,7 @@
 """
 Comment Analysis Service
 Enhanced microservice for sentiment analysis, toxicity detection, and comment processing
-Port: 8080
+Port: 8082
 """
 
 import logging
@@ -116,7 +116,7 @@ class CommentAnalysisService:
             r'[!]{3,}', r'[A-Z]{10,}', r'\$+\d+', r'www\.'
         ]
         
-        logger.info(f"Initialized Comment Analysis Service on port 8080")
+        logger.info(f"Initialized Comment Analysis Service on port 8082")
         logger.info(f"Using device: {self.device}, Model: {self.model_name}")
         
         # Store current JWT token for requests
@@ -941,7 +941,7 @@ def root():
     })
 
 if __name__ == '__main__':
-    port = int(os.environ.get('COMMENT_SERVICE_PORT', os.environ.get('PORT', 8080)))
+    port = int(os.environ.get('COMMENT_SERVICE_PORT', os.environ.get('PORT', 8082)))
     debug = os.environ.get('DEBUG', 'False').lower() == 'true'
     
     logger.info(f"Starting Comment Analysis Service on port {port}")

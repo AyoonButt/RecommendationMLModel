@@ -96,11 +96,14 @@ class RLEnhancedMetadataEnhancer(MetadataEnhancer):
     def _prepare_candidates_for_rl(self, post_ids: List[int], base_scores: np.ndarray,
                                   candidates: List[Dict], content_type: str) -> List[Dict]:
         """Prepare candidate posts for RL processing."""
+        # Batch prefetch all post metadata upfront
+        self._prefetch_post_metadata(post_ids)
+
         candidate_posts = []
-        
+
         for i, post_id in enumerate(post_ids):
             post_metadata = self._get_cached_metadata(f"post:{post_id}")
-            
+
             candidate_post = {
                 'id': post_id,
                 'score': float(base_scores[i]),
@@ -109,12 +112,12 @@ class RLEnhancedMetadataEnhancer(MetadataEnhancer):
                 'metadata': post_metadata or {},
                 'position': i
             }
-            
+
             if candidates and i < len(candidates):
                 candidate_post.update(candidates[i])
-            
+
             candidate_posts.append(candidate_post)
-        
+
         return candidate_posts
     
     def _build_rl_context(self, user_id: int, candidate_posts: List[Dict], content_type: str) -> Dict[str, Any]:

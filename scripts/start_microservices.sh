@@ -95,9 +95,9 @@ if curl -s -f "http://localhost:8080/actuator/health" > /dev/null 2>&1; then
     # Set comment service to use Spring API endpoints
     export COMMENT_SERVICE_INTEGRATED=true
 else
-    echo "Spring API not detected - Starting standalone Comment Analysis Service on port ${COMMENT_SERVICE_PORT:-8080}"
-    start_service "comment-analysis" "../services/comment-analysis/comment_analysis_service.py" ${COMMENT_SERVICE_PORT:-8080}
-    wait_for_service "Comment Analysis Service" "http://localhost:${COMMENT_SERVICE_PORT:-8080}/health"
+    echo "Spring API not detected - Starting standalone Comment Analysis Service on port ${COMMENT_SERVICE_PORT:-8082}"
+    start_service "comment-analysis" "../services/comment-analysis/comment_analysis_service.py" ${COMMENT_SERVICE_PORT:-8082}
+    wait_for_service "Comment Analysis Service" "http://localhost:${COMMENT_SERVICE_PORT:-8082}/health"
 fi
 
 # Start Social Recommendations Service (Port 8081) 
@@ -114,12 +114,12 @@ echo ""
 echo "Service endpoints:"
 echo "  Core Recommendations:  http://localhost:${CORE_SERVICE_PORT:-5000}"
 echo "  Social Recommendations: http://localhost:${SOCIAL_SERVICE_PORT:-8081}"
-echo "  Comment Analysis:      http://localhost:${COMMENT_SERVICE_PORT:-8080}"
+echo "  Comment Analysis:      http://localhost:${COMMENT_SERVICE_PORT:-8082}"
 echo ""
 echo "Health checks:"
 echo "  curl http://localhost:${CORE_SERVICE_PORT:-5000}/health"
 echo "  curl http://localhost:${SOCIAL_SERVICE_PORT:-8081}/health"
-echo "  curl http://localhost:${COMMENT_SERVICE_PORT:-8080}/health"
+echo "  curl http://localhost:${COMMENT_SERVICE_PORT:-8082}/health"
 echo ""
 echo "To stop all services, run: ./scripts/stop_microservices.sh"
 echo "Logs are available in the logs/ directory"

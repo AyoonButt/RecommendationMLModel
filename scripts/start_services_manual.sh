@@ -17,7 +17,7 @@ export SERVICE_AUTH_TOKEN="eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJzdWIiOiJtbC1z
 export CORE_SERVICE_PORT=5000
 export SOCIAL_SERVICE_PORT=8081
 export COMMENT_SERVICE_PORT=8082
-export SPRING_API_URL=http://localhost:8080
+# SPRING_API_URL loaded from .env
 
 echo "📋 Configuration:"
 echo "  Core Service: Port $CORE_SERVICE_PORT"

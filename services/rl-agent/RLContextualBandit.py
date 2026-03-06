@@ -204,13 +204,14 @@ class RLContextualBandit:
     def __init__(self, state_dim: int = 147, config: Dict[str, Any] = None):
         """
         Initialize the contextual bandit.
-        
+
         Args:
             state_dim: Dimension of state vector (from RLStateBuilder)
-            config: Configuration dictionary
+            config: Configuration dictionary (merged with defaults)
         """
         self.state_dim = state_dim
-        self.config = config or self._get_default_config()
+        # Merge provided config with defaults to ensure all required fields exist
+        self.config = self._merge_config(config)
         
         # Neural networks
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -291,6 +292,24 @@ class RLContextualBandit:
                 'exploration_probability_range': [0.0, 0.5]  # Range for exploration probability
             }
         }
+
+    def _merge_config(self, config: Dict[str, Any] = None) -> Dict[str, Any]:
+        """Merge provided config with defaults to ensure all required fields exist."""
+        defaults = self._get_default_config()
+
+        if config is None:
+            return defaults
+
+        # Deep merge config with defaults
+        merged = defaults.copy()
+        for key, value in config.items():
+            if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+                # Merge nested dicts
+                merged[key] = {**merged[key], **value}
+            else:
+                merged[key] = value
+
+        return merged
     
     def select_action(self, state: np.ndarray, user_id: int, context: Dict[str, Any]) -> Action:
         """

@@ -87,7 +87,7 @@ class SocialRecommendationsService:
         load_dotenv()
         
         # Service configuration
-        self.comment_service_url = os.environ.get('COMMENT_ANALYSIS_SERVICE_URL', 'http://localhost:8080')
+        self.comment_service_url = os.environ.get('COMMENT_ANALYSIS_SERVICE_URL', 'http://localhost:8082')
         self.core_service_url = os.environ.get('CORE_RECOMMENDATIONS_SERVICE_URL', 'http://localhost:5000')
         self.api_base_url = os.environ.get('SPRING_API_URL', 'http://localhost:8080')
         

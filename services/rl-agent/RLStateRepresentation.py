@@ -65,7 +65,7 @@ class RLStateBuilder:
     Integrates with existing Two-Tower embeddings and adds temporal/contextual features.
     """
     
-    def __init__(self, user_embedding_dim: int = 32, post_embedding_dim: int = 32, 
+    def __init__(self, user_embedding_dim: int = 32, post_embedding_dim: int = 32,
                  api_base_url: str = "http://localhost:8080"):
         """
         Initialize the state builder.

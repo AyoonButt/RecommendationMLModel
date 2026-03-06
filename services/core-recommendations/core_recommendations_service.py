@@ -20,8 +20,19 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '../../shared/components
 
 from TwoTower import TwoTowerModel, compute_scores
 from MockRedis import MockRedis
-# RL Integration: Replace MetadataEnhancer with RL-enhanced version
+
+# RL Integration: Import RL-enhanced version
+try:
+    from RLEnhancedMetadataEnhancer import RLEnhancedMetadataEnhancer, create_rl_enhanced_metadata_enhancer
+    RL_AVAILABLE = True
+except ImportError:
+    RL_AVAILABLE = False
+
+# Fallback to basic MetadataEnhancer if RL not available
 from MetadataEnhancer import MetadataEnhancer
+
+# Recommendation Explainer - separate module for generating explanations
+from RecommendationExplainer import RecommendationExplainer, create_explainer
 
 # Add path for shared utilities
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../shared'))
@@ -51,6 +62,8 @@ def _error_response(message: str) -> Dict:
     return {
         "error": message,
         "postIds": [],
+        "scores": [],
+        "explanations": [],
         "totalCount": 0
     }
 
@@ -224,9 +237,71 @@ class CoreRecommendationsService:
                     self.current_jwt_token = env_token
                     logger.info("Using service token from environment variable as fallback")
 
-        # Initialize RL-enhanced metadata enhancer
-        self.metadata_enhancer = MetadataEnhancer(self.api_base_url, self.redis_client)
-        logger.info("RL-Enhanced MetadataEnhancer initialized")
+        # Initialize metadata enhancer (RL-enhanced if available)
+        # RL disabled by default until performance is optimized
+        self.rl_enabled = os.environ.get('RL_ENABLED', 'true').lower() == 'true'
+
+        if RL_AVAILABLE and self.rl_enabled:
+            try:
+                # RL configuration
+                rl_config = {
+                    'integration': {
+                        'enabled': True,
+                        'learning_mode': os.environ.get('RL_LEARNING_MODE', 'online'),
+                        'a_b_test_ratio': float(os.environ.get('RL_AB_TEST_RATIO', '0.5')),
+                        'safety_threshold': 0.1,
+                        'warmup_interactions': int(os.environ.get('RL_WARMUP_INTERACTIONS', '10'))
+                    },
+                    'experience': {
+                        'buffer_size': 10000,
+                        'session_timeout': 30
+                    },
+                    'reward': {
+                        'mapping': {
+                            'like': 0.6, 'save': 1.0, 'not_interested': -0.9,
+                            'more_info': 0.3, 'skip': -0.2, 'share': 0.8
+                        },
+                        'shaping_weights': {
+                            'exploration': 0.15, 'engagement': 0.20,
+                            'diversity': 0.10, 'novelty': 0.10, 'long_term': 0.25
+                        }
+                    },
+                    'embeddings': {
+                        'user_dim': int(os.environ.get('EMBEDDING_DIM', '32')),
+                        'post_dim': int(os.environ.get('EMBEDDING_DIM', '32'))
+                    },
+                    'bandit': {
+                        'action_space': {'total_actions': 20, 'action_encoding_dim': 10},
+                        'exploration': {
+                            'strategy': os.environ.get('RL_EXPLORATION_STRATEGY', 'epsilon_greedy'),
+                            'epsilon': float(os.environ.get('RL_EPSILON', '0.1'))
+                        }
+                    },
+                    'performance': {
+                        'max_workers': 4,
+                        'max_processing_time': 0.1,
+                        'fallback_enabled': True
+                    },
+                    'api_base_url': self.api_base_url
+                }
+
+                self.metadata_enhancer = create_rl_enhanced_metadata_enhancer(
+                    api_base_url=self.api_base_url,
+                    redis_client=self.redis_client,
+                    rl_config=rl_config
+                )
+                logger.info("RL-Enhanced MetadataEnhancer initialized with RL agent active")
+            except Exception as e:
+                logger.error(f"Failed to initialize RL components: {e}", exc_info=True)
+                logger.warning("Falling back to basic MetadataEnhancer")
+                self.metadata_enhancer = MetadataEnhancer(self.api_base_url, self.redis_client)
+                self.rl_enabled = False
+        else:
+            self.metadata_enhancer = MetadataEnhancer(self.api_base_url, self.redis_client)
+            if not RL_AVAILABLE:
+                logger.warning("RL components not available, using basic MetadataEnhancer")
+            else:
+                logger.info("RL disabled via environment, using basic MetadataEnhancer")
         
         # Store the current JWT token for this request
         # If we have a token from the token manager, update all clients
@@ -238,7 +313,14 @@ class CoreRecommendationsService:
         # Initialize Two-Tower model
         self.two_tower_model = None
         self._load_model()
-        
+
+        # Initialize Recommendation Explainer (shares metadata cache with enhancer)
+        self.explainer = create_explainer(
+            api_base_url=self.api_base_url,
+            metadata_cache=self.metadata_enhancer.memory_cache
+        )
+        logger.info("RecommendationExplainer initialized")
+
         logger.info(f"Initialized Core Recommendations Service on port 5000")
     
     def _update_jwt_token(self, jwt_token: str = None):
@@ -285,7 +367,7 @@ class CoreRecommendationsService:
     def get_recommendations(self, request_data: Dict[str, Any], jwt_token: str = None) -> Dict[str, Any]:
         """
         Process a recommendation request and return recommended posts
-        
+
         Args:
             request_data: Dictionary containing the recommendation request parameters
                 - userId: User ID (required)
@@ -293,14 +375,15 @@ class CoreRecommendationsService:
                 - limit: Number of recommendations (default: 20)
                 - enableSocial: Whether to apply social enhancement (default: False)
                 - socialWeight: Weight for social signals (default: 0.25)
-                
+                - includeExplanations: Whether to include explanations (default: True)
+
         Returns:
-            Dictionary containing recommended posts with scores
+            Dictionary containing recommended posts with scores and explanations
         """
         try:
             # Update JWT token for this request
             self._update_jwt_token(jwt_token)
-            
+
             # Extract essential request parameters
             user_id = request_data.get("userId")
             if not user_id:
@@ -310,15 +393,22 @@ class CoreRecommendationsService:
             limit = request_data.get("limit", 20)
             enable_social = request_data.get("enableSocial", False)
             social_weight = request_data.get("socialWeight", 0.25)
+            include_explanations = request_data.get("includeExplanations", True)
 
             logger.info(f"Processing recommendation request for user {user_id}, "
                        f"content type: {content_type}, social: {enable_social}")
 
             # Get base recommendations
             if content_type == "trailers":
-                result = self.get_trailer_recommendations(user_id=user_id, limit=limit, jwt_token=jwt_token)
+                result = self.get_trailer_recommendations(
+                    user_id=user_id, limit=limit, jwt_token=jwt_token,
+                    include_explanations=include_explanations
+                )
             else:
-                result = self.get_post_recommendations(user_id=user_id, limit=limit, jwt_token=jwt_token)
+                result = self.get_post_recommendations(
+                    user_id=user_id, limit=limit, jwt_token=jwt_token,
+                    include_explanations=include_explanations
+                )
 
             # Apply social enhancement if requested
             if enable_social and "error" not in result:
@@ -337,12 +427,13 @@ class CoreRecommendationsService:
             logger.error(f"Error processing recommendation request: {str(e)}", exc_info=True)
             return _error_response(f"Error processing recommendation request: {str(e)}")
 
-    def get_post_recommendations(self, user_id: str, limit: int = 20, jwt_token: str = None) -> Dict[str, Any]:
+    def get_post_recommendations(self, user_id: str, limit: int = 20,
+                                  jwt_token: str = None, include_explanations: bool = True) -> Dict[str, Any]:
         """Get post recommendations using the Two-Tower model"""
         try:
             # Update JWT token for this request
             self._update_jwt_token(jwt_token)
-            
+
             start_time = time.time()
 
             # Get user vector
@@ -369,13 +460,14 @@ class CoreRecommendationsService:
                 return {
                     "postIds": [],
                     "scores": [],
+                    "explanations": [],
                     "totalCount": 0,
                     "processingTime": time.time() - start_time,
                     "message": "No candidates found"
                 }
 
             # Score candidates using Two-Tower model with metadata enhancement
-            scored_posts = self._score_candidates(
+            scoring_result = self._score_candidates(
                 user_id=user_id,
                 user_vector=user_vector,
                 candidate_data=candidate_data,
@@ -383,13 +475,26 @@ class CoreRecommendationsService:
             )
 
             # Take top results
-            top_results = scored_posts[:limit]
+            top_results = scoring_result["scored_posts"][:limit]
             final_post_ids = [int(post_id) for post_id, _ in top_results]
             final_scores = [float(score) for _, score in top_results]
+
+            # Generate explanations
+            explanations = []
+            if include_explanations:
+                explanations = self._generate_explanations(
+                    user_id=user_id,
+                    post_ids=final_post_ids,
+                    base_scores=scoring_result["base_scores"],
+                    enhanced_scores=scoring_result["enhanced_scores"],
+                    rl_actions=scoring_result.get("rl_actions", []),
+                    content_type="posts"
+                )
 
             result = {
                 "postIds": final_post_ids,
                 "scores": final_scores,
+                "explanations": explanations,
                 "totalCount": len(final_post_ids),
                 "processingTime": time.time() - start_time,
                 "hasMore": candidate_data["hasMore"],
@@ -405,12 +510,13 @@ class CoreRecommendationsService:
             logger.error(f"Error getting post recommendations: {str(e)}", exc_info=True)
             return _error_response(f"Error getting post recommendations: {str(e)}")
 
-    def get_trailer_recommendations(self, user_id: str, limit: int = 20, jwt_token: str = None) -> Dict[str, Any]:
+    def get_trailer_recommendations(self, user_id: str, limit: int = 20,
+                                    jwt_token: str = None, include_explanations: bool = True) -> Dict[str, Any]:
         """Get trailer recommendations using the Two-Tower model"""
         try:
             # Update JWT token for this request
             self._update_jwt_token(jwt_token)
-            
+
             start_time = time.time()
 
             # Get user vector
@@ -437,13 +543,14 @@ class CoreRecommendationsService:
                 return {
                     "postIds": [],
                     "scores": [],
+                    "explanations": [],
                     "totalCount": 0,
                     "processingTime": time.time() - start_time,
                     "message": "No trailer candidates found"
                 }
 
             # Score candidates using Two-Tower model with metadata enhancement
-            scored_posts = self._score_candidates(
+            scoring_result = self._score_candidates(
                 user_id=user_id,
                 user_vector=user_vector,
                 candidate_data=candidate_data,
@@ -451,13 +558,26 @@ class CoreRecommendationsService:
             )
 
             # Take top results
-            top_results = scored_posts[:limit]
+            top_results = scoring_result["scored_posts"][:limit]
             final_post_ids = [int(post_id) for post_id, _ in top_results]
             final_scores = [float(score) for _, score in top_results]
+
+            # Generate explanations
+            explanations = []
+            if include_explanations:
+                explanations = self._generate_explanations(
+                    user_id=user_id,
+                    post_ids=final_post_ids,
+                    base_scores=scoring_result["base_scores"],
+                    enhanced_scores=scoring_result["enhanced_scores"],
+                    rl_actions=scoring_result.get("rl_actions", []),
+                    content_type="trailers"
+                )
 
             result = {
                 "postIds": final_post_ids,
                 "scores": final_scores,
+                "explanations": explanations,
                 "totalCount": len(final_post_ids),
                 "processingTime": time.time() - start_time,
                 "hasMore": candidate_data["hasMore"],
@@ -505,9 +625,9 @@ class CoreRecommendationsService:
             logger.info(f"URL: {url}")
             logger.info(f"Params: {params}")
             logger.info(f"Headers: {dict((k, 'Bearer ***' if k == 'Authorization' else v) for k, v in headers.items())}")
-            logger.info(f"Timeout: 15s")
-            
-            response = requests.get(url, params=params, headers=headers, timeout=15)
+            logger.info(f"Timeout: (connect=10s, read=60s)")
+
+            response = requests.get(url, params=params, headers=headers, timeout=(10, 60))
             
             logger.info(f"=== CANDIDATE API RESPONSE ===")
             logger.info(f"Status Code: {response.status_code}")
@@ -579,7 +699,7 @@ class CoreRecommendationsService:
 
         except requests.exceptions.Timeout as e:
             logger.error(f"Timeout error fetching candidate vectors for user {user_id}: {str(e)}")
-            logger.error(f"Request timed out after 15 seconds - URL: {url}")
+            logger.error(f"Request timed out (connect=10s, read=60s) - URL: {url}")
             return {"vectors": {}, "nextCursor": None, "hasMore": False}
         except requests.exceptions.ConnectionError as e:
             logger.error(f"Connection error fetching candidate vectors for user {user_id}: {str(e)}")
@@ -636,19 +756,40 @@ class CoreRecommendationsService:
         return default_vector
 
     def _score_candidates(self, user_id: str, user_vector: np.ndarray,
-                          candidate_data: Dict[str, Any], content_type: str) -> List[tuple]:
-        """Score candidate posts using the Two-Tower model with metadata enhancement"""
+                          candidate_data: Dict[str, Any], content_type: str) -> Dict[str, Any]:
+        """
+        Score candidate posts using the Two-Tower model with metadata enhancement.
+
+        Returns:
+            Dict containing:
+                - scored_posts: List of (post_id, final_score) tuples sorted by score
+                - base_scores: Dict mapping post_id to base ML score
+                - enhanced_scores: Dict mapping post_id to final enhanced score
+                - rl_actions: List of RL actions taken (if RL active)
+        """
+        result = {
+            "scored_posts": [],
+            "base_scores": {},
+            "enhanced_scores": {},
+            "rl_actions": []
+        }
+
         if not self.two_tower_model:
             logger.warning("TwoTower model not available, using fallback scoring")
             post_ids = list(candidate_data["vectors"].keys())
-            return [(post_id, np.random.random()) for post_id in post_ids]
+            for post_id in post_ids:
+                score = float(np.random.random())
+                result["base_scores"][post_id] = score
+                result["enhanced_scores"][post_id] = score
+            result["scored_posts"] = [(pid, result["enhanced_scores"][pid]) for pid in post_ids]
+            return result
 
         try:
             vectors = candidate_data["vectors"]
             candidates = candidate_data.get("candidates", [])
 
             if not vectors:
-                return []
+                return result
 
             # Prepare data for scoring
             post_ids = list(vectors.keys())
@@ -659,32 +800,120 @@ class CoreRecommendationsService:
             user_batch = np.expand_dims(user_vector, axis=0)
 
             # Calculate base scores using Two-Tower model
-            base_scores = compute_scores(user_batch, post_vectors_array, content_type)
+            base_scores_array = compute_scores(user_batch, post_vectors_array, content_type)
+
+            # Store base scores
+            for i, post_id in enumerate(post_ids):
+                result["base_scores"][post_id] = float(base_scores_array[0][i])
 
             # Apply metadata enhancement
             enhanced_scores = self.metadata_enhancer.enhance_scores(
                 user_id=user_id,
                 post_ids=post_ids,
-                base_scores=base_scores[0],
+                base_scores=base_scores_array[0],
                 candidates=candidates,
                 content_type=content_type
             )
+
+            # Store enhanced scores
+            for i, post_id in enumerate(post_ids):
+                result["enhanced_scores"][post_id] = float(enhanced_scores[i])
+
+            # Get RL actions if available
+            if hasattr(self.metadata_enhancer, 'rl_manager'):
+                try:
+                    pending = getattr(self.metadata_enhancer, '_pending_actions', {})
+                    user_pending = pending.get(str(user_id), {})
+                    if user_pending and 'action' in user_pending:
+                        result["rl_actions"] = [user_pending['action'].to_dict()]
+                except Exception as e:
+                    logger.debug(f"Could not retrieve RL actions: {e}")
 
             # Combine post IDs with enhanced scores
             scored_posts = list(zip(post_ids, enhanced_scores))
 
             # Sort by score (descending)
             scored_posts.sort(key=lambda x: x[1], reverse=True)
+            result["scored_posts"] = scored_posts
 
-            return scored_posts
+            return result
 
         except Exception as e:
             logger.error(f"Error scoring candidates: {e}", exc_info=True)
             # Fallback to random scores
             post_ids = list(candidate_data["vectors"].keys())
-            return [(post_id, np.random.random()) for post_id in post_ids]
+            for post_id in post_ids:
+                score = float(np.random.random())
+                result["base_scores"][post_id] = score
+                result["enhanced_scores"][post_id] = score
+            result["scored_posts"] = [(pid, result["enhanced_scores"][pid]) for pid in post_ids]
+            return result
 
-    def _apply_social_enhancement(self, user_id: str, base_result: Dict[str, Any], 
+    def _generate_explanations(self, user_id: str, post_ids: List[int],
+                               base_scores: Dict[int, float], enhanced_scores: Dict[int, float],
+                               rl_actions: List[Dict] = None, content_type: str = "posts") -> List[Dict[str, Any]]:
+        """
+        Generate explanations for why each post was recommended.
+
+        This is a separate step that analyzes the scoring results and metadata
+        to produce human-readable explanations.
+
+        Args:
+            user_id: User ID
+            post_ids: List of recommended post IDs (in ranked order)
+            base_scores: Dict mapping post_id to base ML score
+            enhanced_scores: Dict mapping post_id to final enhanced score
+            rl_actions: List of RL actions that were applied
+            content_type: Type of content (posts/trailers)
+
+        Returns:
+            List of explanation dictionaries for each post
+        """
+        try:
+            # Get base and final scores as lists in the same order as post_ids
+            base_score_list = [base_scores.get(pid, 0.0) for pid in post_ids]
+            final_score_list = [enhanced_scores.get(pid, 0.0) for pid in post_ids]
+
+            # Get user metadata from cache
+            user_metadata = self.metadata_enhancer._get_cached_metadata(f"user:{user_id}")
+            logger.debug(f"Explainer user_metadata keys: {list(user_metadata.keys()) if user_metadata else 'None'}")
+
+            # Get post metadata from cache
+            post_metadata_map = {}
+            for post_id in post_ids:
+                post_meta = self.metadata_enhancer._get_cached_metadata(f"post:{post_id}")
+                if post_meta:
+                    post_metadata_map[post_id] = post_meta
+            logger.debug(f"Explainer post_metadata_map: {len(post_metadata_map)} posts have metadata")
+
+            # Call the explainer
+            explanation_objects = self.explainer.explain_recommendations(
+                user_id=str(user_id),
+                post_ids=post_ids,
+                base_scores=base_score_list,
+                final_scores=final_score_list,
+                user_metadata=user_metadata,
+                post_metadata_map=post_metadata_map,
+                rl_actions=rl_actions,
+                content_type=content_type
+            )
+
+            # Format for API response
+            return self.explainer.format_response(explanation_objects, compact=False)
+
+        except Exception as e:
+            logger.warning(f"Error generating explanations: {e}")
+            # Return minimal explanations on error
+            return [
+                {
+                    "postId": pid,
+                    "reason": "Recommended based on your preferences",
+                    "score": enhanced_scores.get(pid, 0.0)
+                }
+                for pid in post_ids
+            ]
+
+    def _apply_social_enhancement(self, user_id: str, base_result: Dict[str, Any],
                                 social_weight: float) -> Optional[Dict[str, Any]]:
         """Apply social enhancement to base recommendations via social service"""
         try:
@@ -745,49 +974,59 @@ class CoreRecommendationsService:
     def process_user_interaction(self, request_data: Dict[str, Any], jwt_token: str = None) -> Dict[str, Any]:
         """
         Process user interaction feedback for RL learning.
-        
+
         Args:
             request_data: Dictionary containing:
                 - userId: User ID (required)
                 - postId: Post ID that was interacted with (required)
                 - interactionType: Type of interaction (required)
                 - additionalContext: Optional additional context
-                
+
         Returns:
             Success/error response
         """
         try:
             # Update JWT token for this request
             self._update_jwt_token(jwt_token)
-            
+
             user_id = request_data.get("userId")
             post_id = request_data.get("postId")
             interaction_type = request_data.get("interactionType")
-            
+
             if not all([user_id, post_id, interaction_type]):
                 return {"error": "userId, postId, and interactionType are required"}
-            
+
+            # Check if RL-enhanced metadata enhancer is available
+            if not hasattr(self.metadata_enhancer, 'process_user_interaction'):
+                logger.info(f"RL not active, interaction logged but not processed: user {user_id}, post {post_id}, type {interaction_type}")
+                return {
+                    "success": True,
+                    "message": f"Interaction logged (RL not active): {interaction_type} for user {user_id}",
+                    "rl_processed": False
+                }
+
             # Process through RL-enhanced metadata enhancer
             additional_context = request_data.get("additionalContext", {})
             additional_context.update({
                 'timestamp': time.time(),
                 'service': 'core-recommendations'
             })
-            
+
             self.metadata_enhancer.process_user_interaction(
                 user_id=str(user_id),
                 post_id=int(post_id),
                 interaction_type=interaction_type,
                 additional_context=additional_context
             )
-            
-            logger.debug(f"Processed RL interaction: user {user_id}, post {post_id}, type {interaction_type}")
-            
+
+            logger.info(f"Processed RL interaction: user {user_id}, post {post_id}, type {interaction_type}")
+
             return {
                 "success": True,
-                "message": f"Processed {interaction_type} interaction for user {user_id}"
+                "message": f"Processed {interaction_type} interaction for user {user_id}",
+                "rl_processed": True
             }
-            
+
         except Exception as e:
             logger.error(f"Error processing user interaction: {e}", exc_info=True)
             return {"error": f"Error processing interaction: {str(e)}"}
@@ -802,26 +1041,47 @@ class CoreRecommendationsService:
                 },
                 "serviceConnections": {
                     "socialService": self.social_service_url,
-                    "commentService": self.comment_service_url
+                    "commentService": self.comment_service_url,
+                    "apiBaseUrl": self.api_base_url
                 },
                 "cursorsTracked": len(self.cursor_tracker),
-                "version": os.environ.get("SERVICE_VERSION", "1.0.0")
+                "version": os.environ.get("SERVICE_VERSION", "1.1.0")
             }
-            
+
+            # Check RL status
+            is_rl_enhancer = hasattr(self.metadata_enhancer, 'get_rl_stats')
+            base_stats["rl_active"] = is_rl_enhancer and self.rl_enabled
+
             # Add RL statistics
             try:
-                rl_stats = self.metadata_enhancer.get_stats()
-                base_stats["rl_enhancement"] = rl_stats.get("rl_enhancement", {})
-                base_stats["metadata_enhancement"] = {
-                    "cache_size": rl_stats.get("cache_size", 0),
-                    "boost_factors": rl_stats.get("boost_factors", {})
-                }
+                if is_rl_enhancer:
+                    rl_stats = self.metadata_enhancer.get_rl_stats()
+                    base_stats["rl_enhancement"] = rl_stats.get("rl_enhancement", {})
+                    base_stats["metadata_enhancement"] = {
+                        "cache_size": rl_stats.get("cache_size", 0),
+                        "boost_factors": rl_stats.get("boost_factors", {}),
+                        "redis_available": rl_stats.get("redis_available", False)
+                    }
+                else:
+                    # Basic metadata enhancer stats
+                    enhancement_stats = self.metadata_enhancer.get_enhancement_stats()
+                    base_stats["rl_enhancement"] = {
+                        "enabled": False,
+                        "mode": "metadata_only",
+                        "message": "RL agent not active, using basic metadata enhancement"
+                    }
+                    base_stats["metadata_enhancement"] = {
+                        "cache_size": enhancement_stats.get("cache_size", 0),
+                        "boost_factors": enhancement_stats.get("boost_factors", {}),
+                        "redis_available": enhancement_stats.get("redis_available", False)
+                    }
             except Exception as e:
-                logger.warning(f"Error getting RL stats: {e}")
+                logger.warning(f"Error getting enhancement stats: {e}")
                 base_stats["rl_enhancement"] = {"error": str(e)}
-            
+                base_stats["metadata_enhancement"] = {"error": str(e)}
+
             return base_stats
-            
+
         except Exception as e:
             logger.error(f"Error getting service stats: {e}")
             return {"error": str(e)}
@@ -874,7 +1134,8 @@ def get_post_recommendations():
         request_data = request.json or {}
         user_id = request_data.get("userId")
         limit = request_data.get("limit", 20)
-        
+        include_explanations = request_data.get("includeExplanations", True)
+
         if not user_id:
             return jsonify({"error": "userId is required"}), 400
 
@@ -882,12 +1143,17 @@ def get_post_recommendations():
         jwt_token = None
         if extract_jwt_token:
             jwt_token = extract_jwt_token()
-        
-        response = core_service.get_post_recommendations(user_id, limit, jwt_token=jwt_token)
+
+        response = core_service.get_post_recommendations(
+            user_id, limit,
+            jwt_token=jwt_token,
+            include_explanations=include_explanations
+        )
         return jsonify(response)
     except Exception as e:
         logger.error(f"Error in post recommendations endpoint: {e}", exc_info=True)
         return jsonify({"error": str(e), "postIds": [], "totalCount": 0}), 500
+
 
 @app.route('/recommendations/trailers', methods=['POST'])
 def get_trailer_recommendations():
@@ -896,7 +1162,8 @@ def get_trailer_recommendations():
         request_data = request.json or {}
         user_id = request_data.get("userId")
         limit = request_data.get("limit", 20)
-        
+        include_explanations = request_data.get("includeExplanations", True)
+
         if not user_id:
             return jsonify({"error": "userId is required"}), 400
 
@@ -904,8 +1171,12 @@ def get_trailer_recommendations():
         jwt_token = None
         if extract_jwt_token:
             jwt_token = extract_jwt_token()
-        
-        response = core_service.get_trailer_recommendations(user_id, limit, jwt_token=jwt_token)
+
+        response = core_service.get_trailer_recommendations(
+            user_id, limit,
+            jwt_token=jwt_token,
+            include_explanations=include_explanations
+        )
         return jsonify(response)
     except Exception as e:
         logger.error(f"Error in trailer recommendations endpoint: {e}", exc_info=True)
@@ -964,25 +1235,95 @@ def get_stats():
         logger.error(f"Error in stats endpoint: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
+
+@app.route('/rl/enable', methods=['POST'])
+def enable_rl():
+    """Enable RL processing"""
+    try:
+        if not RL_AVAILABLE:
+            return jsonify({"error": "RL components not available"}), 400
+
+        if hasattr(core_service.metadata_enhancer, 'rl_manager'):
+            core_service.metadata_enhancer.rl_manager.enable_rl()
+            core_service.rl_enabled = True
+            return jsonify({"success": True, "message": "RL processing enabled"})
+        else:
+            return jsonify({"error": "RL manager not initialized"}), 400
+    except Exception as e:
+        logger.error(f"Error enabling RL: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/rl/disable', methods=['POST'])
+def disable_rl():
+    """Disable RL processing"""
+    try:
+        if hasattr(core_service.metadata_enhancer, 'rl_manager'):
+            core_service.metadata_enhancer.rl_manager.disable_rl()
+            core_service.rl_enabled = False
+            return jsonify({"success": True, "message": "RL processing disabled"})
+        else:
+            return jsonify({"success": True, "message": "RL was not active"})
+    except Exception as e:
+        logger.error(f"Error disabling RL: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/rl/status', methods=['GET'])
+def get_rl_status():
+    """Get detailed RL status"""
+    try:
+        status = {
+            "rl_components_available": RL_AVAILABLE,
+            "rl_enabled_in_config": core_service.rl_enabled if hasattr(core_service, 'rl_enabled') else False,
+            "rl_enhancer_active": hasattr(core_service.metadata_enhancer, 'rl_manager'),
+        }
+
+        if hasattr(core_service.metadata_enhancer, 'rl_manager'):
+            rl_manager = core_service.metadata_enhancer.rl_manager
+            status["rl_manager_status"] = {
+                "is_enabled": rl_manager.is_enabled,
+                "learning_mode": rl_manager.learning_mode,
+                "a_b_test_ratio": rl_manager.a_b_test_ratio,
+                "integration_stats": rl_manager.get_integration_stats()
+            }
+
+        if hasattr(core_service.metadata_enhancer, 'get_rl_stats'):
+            status["rl_stats"] = core_service.metadata_enhancer.get_rl_stats()
+
+        return jsonify(status)
+    except Exception as e:
+        logger.error(f"Error getting RL status: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/', methods=['GET'])
 def root():
     """Root endpoint with service information"""
+    rl_status = {
+        "available": RL_AVAILABLE,
+        "enabled": core_service.rl_enabled if hasattr(core_service, 'rl_enabled') else False,
+        "active": hasattr(core_service.metadata_enhancer, 'get_rl_stats')
+    }
+
     return jsonify({
-        "service": "Core Recommendations Service (RL-Enhanced)",
+        "service": "Core Recommendations Service",
         "version": "1.1.0",
         "description": "ML recommendations with RL-enhanced metadata boosting",
+        "rl_status": rl_status,
         "endpoints": {
             "health": "/health",
             "recommendations": "/recommendations",
             "post_recommendations": "/recommendations/posts",
             "trailer_recommendations": "/recommendations/trailers",
             "social_recommendations": "/recommendations/social",
-            "interactions": "/interactions",
+            "interactions": "/interactions (RL feedback)",
             "stats": "/stats"
         },
-        "new_features": {
-            "rl_enhancement": "Adaptive boost factors based on user interactions",
-            "interaction_processing": "Real-time learning from user feedback"
+        "features": {
+            "two_tower_model": "User-Post embedding similarity scoring",
+            "metadata_enhancement": "Language, genre, cast/crew, recency boosting",
+            "rl_enhancement": "Adaptive boost factors based on user interactions" if rl_status["active"] else "Disabled",
+            "social_enhancement": "Optional social signal boosting via social service"
         }
     })
 

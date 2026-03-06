@@ -14,7 +14,7 @@ services:
       - DEBUG=false
       - SPRING_API_URL=http://host.docker.internal:8080
       - SOCIAL_SERVICE_URL=http://social-recommendations:8081
-      - COMMENT_SERVICE_URL=http://comment-analysis:8080
+      - COMMENT_SERVICE_URL=http://comment-analysis:8082
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - LOCAL_DEV=false
@@ -50,7 +50,7 @@ services:
       - PORT=8081
       - DEBUG=false
       - SPRING_API_URL=http://host.docker.internal:8080
-      - COMMENT_ANALYSIS_SERVICE_URL=http://comment-analysis:8080
+      - COMMENT_ANALYSIS_SERVICE_URL=http://comment-analysis:8082
       - CORE_RECOMMENDATIONS_SERVICE_URL=http://core-recommendations:5000
       - FOLLOWING_WEIGHT=0.4
       - COMMUNITY_WEIGHT=0.3
@@ -71,16 +71,16 @@ services:
       timeout: 10s
       retries: 3
 
-  # Comment Analysis Service (Port 8080)
+  # Comment Analysis Service (Port 8082)
   comment-analysis:
     build:
       context: ../..
       dockerfile: deployment/docker/Dockerfile.comment-analysis
     container_name: comment-analysis-service
     ports:
-      - "8080:8080"
+      - "8082:8082"
     environment:
-      - PORT=8080
+      - PORT=8082
       - DEBUG=false
       - SPRING_API_URL=http://host.docker.internal:8080
       - BERT_MODEL=nlptown/bert-base-multilingual-uncased-sentiment
@@ -94,7 +94,7 @@ services:
       - recommendation-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
       interval: 30s
       timeout: 10s
       retries: 3

@@ -56,8 +56,43 @@ class MetadataEnhancer:
         try:
             enhanced_scores = base_scores.copy()
 
+            # Batch prefetch all post metadata upfront to avoid N+1 API calls
+            self._prefetch_post_metadata(post_ids)
+
+            # Log cache status
+            logger.info(f"=== METADATA CACHE STATUS ===")
+            logger.info(f"Total cache entries: {len(self.memory_cache)}")
+            post_cache_count = sum(1 for k in self.memory_cache.keys() if k.startswith('post:'))
+            user_cache_count = sum(1 for k in self.memory_cache.keys() if k.startswith('user:'))
+            logger.info(f"Post entries: {post_cache_count}, User entries: {user_cache_count}")
+
             # Get user metadata for preference-based enhancement
             user_metadata = self._get_cached_metadata(f"user:{user_id}")
+
+            # Log user metadata
+            logger.info(f"=== USER METADATA for user {user_id} ===")
+            if user_metadata:
+                logger.info(f"User metadata keys: {list(user_metadata.keys())}")
+                logger.info(f"  languageWeights: {user_metadata.get('languageWeights', 'NOT PRESENT')}")
+                logger.info(f"  interestWeights: {user_metadata.get('interestWeights', 'NOT PRESENT')}")
+                logger.info(f"  castCrewPreferences: {'PRESENT' if user_metadata.get('castCrewPreferences') else 'NOT PRESENT'}")
+                logger.info(f"  categoricalFeatures: {user_metadata.get('categoricalFeatures', 'NOT PRESENT')}")
+            else:
+                logger.warning(f"NO USER METADATA FOUND for user {user_id}")
+
+            # Log sample post metadata
+            if post_ids:
+                sample_post_id = post_ids[0]
+                sample_post_metadata = self._get_cached_metadata(f"post:{sample_post_id}")
+                logger.info(f"=== SAMPLE POST METADATA for post {sample_post_id} ===")
+                if sample_post_metadata:
+                    logger.info(f"Post metadata keys: {list(sample_post_metadata.keys())}")
+                    logger.info(f"  genreWeights: {sample_post_metadata.get('genreWeights', 'NOT PRESENT')}")
+                    logger.info(f"  categoricalFeatures: {sample_post_metadata.get('categoricalFeatures', 'NOT PRESENT')}")
+                    logger.info(f"  voteAverage: {sample_post_metadata.get('voteAverage', 'NOT PRESENT')}")
+                    logger.info(f"  recencyBoost: {sample_post_metadata.get('recencyBoost', 'NOT PRESENT')}")
+                else:
+                    logger.warning(f"NO POST METADATA FOUND for post {sample_post_id}")
 
             if user_metadata:
                 # Apply language preference boosting
@@ -354,6 +389,106 @@ class MetadataEnhancer:
             logger.warning(f"Error applying content boosting: {e}")
             return scores
 
+    def _prefetch_post_metadata(self, post_ids: List[int]) -> None:
+        """
+        Batch prefetch metadata for all posts to avoid N+1 API calls.
+        Only fetches posts that are not already cached.
+        """
+        now = time.time()
+
+        # Find posts that need fetching (not in cache or expired)
+        posts_to_fetch = []
+        for post_id in post_ids:
+            key = f"post:{post_id}"
+            if key in self.memory_cache:
+                entry = self.memory_cache[key]
+                if now - entry['timestamp'] < self.cache_ttl:
+                    continue  # Already cached and valid
+            posts_to_fetch.append(post_id)
+
+        if not posts_to_fetch:
+            logger.info(f"BATCH METADATA: All {len(post_ids)} posts already in memory cache")
+            return  # All posts already cached
+
+        logger.info(f"BATCH METADATA: {len(post_ids) - len(posts_to_fetch)} in memory cache, {len(posts_to_fetch)} need fetching")
+
+        # Check Redis for any missing posts
+        if self.redis_client:
+            try:
+                import json
+                still_need_fetch = []
+                for post_id in posts_to_fetch:
+                    cached_data = self.redis_client.get(f"metadata:post:{post_id}")
+                    if cached_data:
+                        data = json.loads(cached_data)
+                        self.memory_cache[f"post:{post_id}"] = {'data': data, 'timestamp': now}
+                    else:
+                        still_need_fetch.append(post_id)
+                posts_to_fetch = still_need_fetch
+            except Exception as e:
+                logger.warning(f"Error checking Redis cache for batch: {e}")
+
+        if not posts_to_fetch:
+            return  # All posts found in Redis
+
+        # Batch fetch from API
+        try:
+            batch_metadata = self._fetch_batch_post_metadata(posts_to_fetch)
+            if batch_metadata:
+                import json
+                for post_id, metadata in batch_metadata.items():
+                    if metadata is not None:
+                        key = f"post:{post_id}"
+                        self.memory_cache[key] = {'data': metadata, 'timestamp': now}
+
+                        # Also cache in Redis
+                        if self.redis_client:
+                            try:
+                                self.redis_client.setex(
+                                    f"metadata:{key}",
+                                    self.cache_ttl,
+                                    json.dumps(metadata)
+                                )
+                            except Exception as e:
+                                logger.warning(f"Error caching to Redis: {e}")
+
+                logger.debug(f"Batch fetched metadata for {len(batch_metadata)} posts")
+        except Exception as e:
+            logger.warning(f"Error batch fetching post metadata: {e}")
+
+    def _fetch_batch_post_metadata(self, post_ids: List[int]) -> Optional[Dict[int, Dict]]:
+        """Fetch metadata for multiple posts in a single batch API call."""
+        try:
+            if not post_ids:
+                return {}
+
+            logger.info(f"BATCH METADATA: Fetching metadata for {len(post_ids)} posts: {post_ids}")
+            url = f"{self.api_base_url}/api/internal/posts/metadata/batch"
+
+            # Add service authentication headers
+            headers = {'Content-Type': 'application/json'}
+            import os
+            auth_token = os.environ.get('SERVICE_AUTH_TOKEN', '')
+            if auth_token:
+                headers['Authorization'] = f'Bearer {auth_token}'
+                headers['X-Service-Role'] = 'SERVICE'
+
+            response = requests.post(url, json=post_ids, headers=headers, timeout=10)
+
+            if response.status_code == 200:
+                # Response is Map<Int, Map<String, Any?>?> - convert string keys to int
+                raw_response = response.json()
+                result = {int(k): v for k, v in raw_response.items()}
+                logger.info(f"BATCH METADATA: Received {len(result)} posts from API")
+                return result
+            else:
+                logger.warning(f"BATCH METADATA: API returned status {response.status_code}")
+                return None
+
+        except Exception as e:
+            logger.warning(f"Error fetching batch metadata from API: {e}")
+            return None
+
     def _get_cached_metadata(self, key: str) -> Optional[Dict]:
         """Get metadata from cache or API with caching."""
         now = time.time()
@@ -377,7 +512,7 @@ class MetadataEnhancer:
             except Exception as e:
                 logger.warning(f"Error reading from Redis cache: {e}")
 
-        # Fetch from API
+        # Fetch from API (for user metadata or individual post fallback)
         try:
             data = self._fetch_metadata_from_api(key)
             if data:
