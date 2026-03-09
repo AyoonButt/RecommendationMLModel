@@ -16,8 +16,9 @@ COPY services/core-recommendations/requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy shared components
+# Copy shared components to both locations (for different import styles)
 COPY shared/components/ ./shared/components/
+COPY shared/components/*.py ./
 
 # Copy application code
 COPY services/core-recommendations/ ./
