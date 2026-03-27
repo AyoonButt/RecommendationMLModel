@@ -33,14 +33,15 @@ app = Flask(__name__)
 # Import JWT utilities
 try:
     import sys
-    import os
     sys.path.append(os.path.join(os.path.dirname(__file__), '../../shared'))
     from auth.JwtTokenUtil import extract_jwt_token, create_auth_headers, get_token_or_fallback
+    from auth.ServiceTokenManager import get_service_token_manager
 except ImportError:
     logger.warning("JWT utilities not available, falling back to environment tokens")
     extract_jwt_token = None
     create_auth_headers = None
     get_token_or_fallback = None
+    get_service_token_manager = None
 
 class SentimentLabel(Enum):
     POSITIVE = "POSITIVE"
@@ -121,6 +122,29 @@ class CommentAnalysisService:
         
         # Store current JWT token for requests
         self.current_jwt_token = None
+
+        # Initialize service token manager
+        self.token_manager = None
+        if get_service_token_manager:
+            try:
+                self.token_manager = get_service_token_manager("comment-analysis")
+                if self.token_manager.request_service_token(self.api_base_url):
+                    logger.info("Successfully obtained service token from API")
+                    self.current_jwt_token = self.token_manager.get_access_token()
+                else:
+                    logger.warning("Could not obtain service token from API, falling back to environment variable")
+                    env_token = os.environ.get('SERVICE_AUTH_TOKEN')
+                    if env_token:
+                        self.current_jwt_token = env_token
+                        logger.info("Using service token from environment variable")
+                    else:
+                        logger.error("No service token available from API or environment")
+            except Exception as e:
+                logger.warning(f"Could not initialize service token manager: {e}")
+                env_token = os.environ.get('SERVICE_AUTH_TOKEN')
+                if env_token:
+                    self.current_jwt_token = env_token
+                    logger.info("Using service token from environment variable as fallback")
     
     def _update_jwt_token(self, jwt_token: str = None):
         """Update JWT token for this request"""
@@ -334,18 +358,20 @@ class CommentAnalysisService:
         try:
             url = f"{self.api_base_url}/api/posts/{post_id}/comments"
             params = {"includeReplies": True, "limit": 500}  # Analyze up to 500 comments
-            
-            response = requests.get(url, params=params, timeout=10)
-            
+
+            response = requests.get(url, params=params, headers=self._get_auth_headers(), timeout=10)
+
             if response.status_code == 200:
                 data = response.json()
                 return data.get("comments", [])
+            elif response.status_code == 401 or response.status_code == 403:
+                logger.error(f"Authentication failed ({response.status_code}) fetching comments for post {post_id}. Token present: {bool(self.current_jwt_token)}")
             else:
                 logger.warning(f"Failed to fetch comments for post {post_id}: {response.status_code}")
-                
+
         except Exception as e:
             logger.warning(f"Error fetching comments for post {post_id}: {e}")
-        
+
         return []
 
     def _analyze_comments_batch(self, comments: List[Dict]) -> List[CommentAnalysis]:
@@ -605,7 +631,7 @@ class CommentAnalysisService:
             self._comment_cache.clear()
         logger.info("Cleared all caches")
 
-    def update_comment_analysis(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
+    def update_comment_analysis(self, request_data: Dict[str, Any], jwt_token: str = None) -> Dict[str, Any]:
         """
         Update comment with analysis results via API call.
         
@@ -620,8 +646,9 @@ class CommentAnalysisService:
             Success/error response
         """
         try:
+            self._update_jwt_token(jwt_token)
             comment_id = request_data.get("commentId")
-            post_id = request_data.get("postId") 
+            post_id = request_data.get("postId")
             analysis_data = request_data.get("analysisData")
             
             if not all([comment_id, post_id, analysis_data]):
@@ -664,7 +691,7 @@ class CommentAnalysisService:
             logger.error(f"Error updating comment analysis: {e}", exc_info=True)
             return self._error_response(f"Error updating comment analysis: {str(e)}")
 
-    def batch_update_comments(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
+    def batch_update_comments(self, request_data: Dict[str, Any], jwt_token: str = None) -> Dict[str, Any]:
         """
         Update multiple comments with analysis results.
         
@@ -676,6 +703,7 @@ class CommentAnalysisService:
             Batch update results
         """
         try:
+            self._update_jwt_token(jwt_token)
             updates = request_data.get("updates", [])
             if not updates:
                 return self._error_response("updates array is required")
@@ -705,7 +733,7 @@ class CommentAnalysisService:
             logger.error(f"Error in batch comment update: {e}", exc_info=True)
             return self._error_response(f"Error in batch update: {str(e)}")
 
-    def analyze_and_update_comment(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
+    def analyze_and_update_comment(self, request_data: Dict[str, Any], jwt_token: str = None) -> Dict[str, Any]:
         """
         Analyze comment text and automatically update the comment with results.
         
@@ -720,6 +748,7 @@ class CommentAnalysisService:
             Analysis results and update status
         """
         try:
+            self._update_jwt_token(jwt_token)
             comment_id = request_data.get("commentId")
             post_id = request_data.get("postId")
             text = request_data.get("text")
@@ -761,15 +790,18 @@ class CommentAnalysisService:
         """Update comment via Spring API call."""
         try:
             url = f"{self.api_base_url}/api/comments/{comment_id}/analysis"
-            
-            response = requests.put(url, json=update_payload, timeout=10)
-            
+
+            response = requests.put(url, json=update_payload, headers=self._get_auth_headers(), timeout=10)
+
             if response.status_code in [200, 204]:
                 return True
+            elif response.status_code == 401 or response.status_code == 403:
+                logger.error(f"Authentication failed ({response.status_code}) updating comment {comment_id}. Token present: {bool(self.current_jwt_token)}")
+                return False
             else:
                 logger.warning(f"API returned status {response.status_code} for comment update {comment_id}")
                 return False
-                
+
         except Exception as e:
             logger.warning(f"Error updating comment {comment_id} via API: {e}")
             return False
@@ -824,8 +856,9 @@ def analyze_batch_texts():
         data = request.get_json()
         if not data or 'texts' not in data:
             return jsonify({"error": "Missing 'texts' field"}), 400
-        
-        response = comment_service.analyze_comments_batch(data)
+
+        jwt_token = extract_jwt_token() if extract_jwt_token else None
+        response = comment_service.analyze_comments_batch(data, jwt_token=jwt_token)
         
         # Convert to BERT service compatible format
         if "results" in response:
@@ -851,7 +884,8 @@ def analyze_batch_texts():
 def get_post_sentiment(post_id):
     """Get sentiment analysis for a specific post's comments"""
     try:
-        response = comment_service.get_post_sentiment_summary(post_id)
+        jwt_token = extract_jwt_token() if extract_jwt_token else None
+        response = comment_service.get_post_sentiment_summary(post_id, jwt_token=jwt_token)
         return jsonify(response)
     except Exception as e:
         logger.error(f"Error in post sentiment endpoint: {e}", exc_info=True)
@@ -869,8 +903,9 @@ def analyze_batch_posts():
         data = request.get_json()
         if not data:
             return jsonify({"error": "No request data provided"}), 400
-        
-        response = comment_service.analyze_batch_posts_sentiment(data)
+
+        jwt_token = extract_jwt_token() if extract_jwt_token else None
+        response = comment_service.analyze_batch_posts_sentiment(data, jwt_token=jwt_token)
         return jsonify(response)
     except Exception as e:
         logger.error(f"Error in batch post sentiment endpoint: {e}", exc_info=True)
@@ -883,8 +918,9 @@ def analyze_post_comments(post_id):
         data = request.get_json() or {}
         data["postId"] = post_id
         data["includeIndividualComments"] = True
-        
-        response = comment_service.analyze_post_sentiment(data)
+
+        jwt_token = extract_jwt_token() if extract_jwt_token else None
+        response = comment_service.analyze_post_sentiment(data, jwt_token=jwt_token)
         return jsonify(response)
     except Exception as e:
         logger.error(f"Error in post comment analysis endpoint: {e}", exc_info=True)

@@ -7,7 +7,9 @@ Port: 5000
 
 import logging
 import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Optional
 import numpy as np
 import redis
@@ -20,6 +22,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '../../shared/components
 
 from TwoTower import TwoTowerModel, compute_scores
 from MockRedis import MockRedis
+from CandidatePoolCache import CandidatePoolCache
 
 # RL Integration: Import RL-enhanced version
 try:
@@ -52,6 +55,9 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
 )
 logger = logging.getLogger("core-recommendations-service")
+
+# Shared executor for parallel I/O (user vector + candidate fetch, mark_shown fire-and-forget)
+_executor = ThreadPoolExecutor(max_workers=8)
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -95,18 +101,51 @@ class ServiceClient:
     
     def post(self, endpoint: str, data: Dict) -> Optional[Dict]:
         """Make POST request to service"""
+        url = f"{self.base_url}{endpoint}"
         try:
-            url = f"{self.base_url}{endpoint}"
+            logger.debug(f"=== SERVICE POST REQUEST ===")
+            logger.debug(f"URL: {url}")
+            logger.debug(f"Payload keys: {list(data.keys()) if data else 'None'}")
+            logger.debug(f"Timeout: {self.timeout}s")
+
             response = requests.post(url, json=data, headers=self.headers, timeout=self.timeout)
-            
+
             if response.status_code == 200:
+                logger.debug(f"Service POST successful: {url}")
                 return response.json()
             else:
-                logger.warning(f"Service request failed: {url}, status: {response.status_code}")
-                
+                logger.warning(f"=== SERVICE POST FAILED ===")
+                logger.warning(f"URL: {url}")
+                logger.warning(f"Status code: {response.status_code}")
+                try:
+                    error_body = response.text[:500]  # Limit error body length
+                    logger.warning(f"Response body: {error_body}")
+                except:
+                    logger.warning("Could not read response body")
+
+                if response.status_code == 401 or response.status_code == 403:
+                    logger.error(f"Authentication/Authorization failed for service POST to {endpoint}")
+                elif response.status_code == 404:
+                    logger.warning(f"Endpoint not found: {url}")
+                elif response.status_code >= 500:
+                    logger.error(f"Server error from service at {url}")
+
+        except requests.exceptions.Timeout as e:
+            logger.error(f"=== SERVICE POST TIMEOUT ===")
+            logger.error(f"Request to {url} timed out after {self.timeout}s")
+            logger.error(f"Timeout details: {str(e)}")
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"=== SERVICE POST CONNECTION ERROR ===")
+            logger.error(f"Failed to connect to service at {url}")
+            logger.error(f"Connection error details: {str(e)}")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"=== SERVICE POST REQUEST ERROR ===")
+            logger.error(f"Request to {url} failed")
+            logger.error(f"Request error details: {str(e)}")
         except Exception as e:
-            logger.error(f"Service communication error: {e}")
-        
+            logger.error(f"=== SERVICE POST UNEXPECTED ERROR ===")
+            logger.error(f"Unexpected error during POST to {url}: {e}", exc_info=True)
+
         return None
     
     def get(self, endpoint: str, params: Dict = None) -> Optional[Dict]:
@@ -152,6 +191,7 @@ class CoreRecommendationsService:
     def __init__(self):
         """Initialize the core recommendations service"""
         self.cursor_tracker = {}
+        self._cursor_lock = threading.RLock()
         load_dotenv()
 
         # Service URLs
@@ -208,6 +248,12 @@ class CoreRecommendationsService:
         self.user_vector_key_prefix = "user_vector:"
         self.post_vector_key_prefix = "post_vector:"
         self.vector_cache_ttl = 3600  # 1 hour
+
+        # Candidate pool cache
+        self.pool_enabled = os.environ.get('POOL_ENABLED', 'true').lower() == 'true'
+        pool_ttl = int(os.environ.get('POOL_TTL', 86400))
+        self.pool_cache = CandidatePoolCache(self.redis_client, pool_ttl=pool_ttl)
+        logger.info(f"Candidate pool cache initialized (enabled={self.pool_enabled}, ttl={pool_ttl}s, cap=200)")
 
         # Initialize service token manager
         self.token_manager = None
@@ -308,7 +354,10 @@ class CoreRecommendationsService:
         if hasattr(self, 'current_jwt_token') and self.current_jwt_token:
             self.social_client.update_token(self.current_jwt_token)
             self.comment_client.update_token(self.current_jwt_token)
-            logger.info("Updated all service clients with token from API")
+            # Also update the metadata enhancer with the JWT token
+            if hasattr(self.metadata_enhancer, 'set_jwt_token'):
+                self.metadata_enhancer.set_jwt_token(self.current_jwt_token)
+            logger.info("Updated all service clients and metadata enhancer with token from API")
 
         # Initialize Two-Tower model
         self.two_tower_model = None
@@ -329,6 +378,9 @@ class CoreRecommendationsService:
             self.current_jwt_token = jwt_token
             self.social_client.update_token(jwt_token)
             self.comment_client.update_token(jwt_token)
+            # Also update the metadata enhancer
+            if hasattr(self.metadata_enhancer, 'set_jwt_token'):
+                self.metadata_enhancer.set_jwt_token(jwt_token)
         elif get_token_or_fallback and not self.current_jwt_token:
             # Try to get token from request or fallback
             fallback_token = get_token_or_fallback()
@@ -336,6 +388,9 @@ class CoreRecommendationsService:
                 self.current_jwt_token = fallback_token
                 self.social_client.update_token(fallback_token)
                 self.comment_client.update_token(fallback_token)
+                # Also update the metadata enhancer
+                if hasattr(self.metadata_enhancer, 'set_jwt_token'):
+                    self.metadata_enhancer.set_jwt_token(fallback_token)
 
     def _load_model(self):
         """Load the TwoTower model"""
@@ -435,28 +490,82 @@ class CoreRecommendationsService:
             self._update_jwt_token(jwt_token)
 
             start_time = time.time()
+            logger.info(f"=== POST RECOMMENDATIONS REQUEST for user {user_id} ===")
+            logger.info(f"Request params - limit: {limit}, include_explanations: {include_explanations}")
 
-            # Get user vector
-            user_vector = self._get_user_vector(user_id)
+            # Fetch user vector and pool candidates in parallel (they are independent)
+            logger.info(f"Fetching user vector and pool candidates in parallel for user {user_id}...")
+            fetch_limit = limit * 2  # Get more candidates for better selection
+            future_user_vec = _executor.submit(self._get_user_vector, user_id)
+            future_pool = _executor.submit(
+                self.pool_cache.pull_candidates, user_id, "posts"
+            ) if self.pool_enabled else None
+
+            user_vector = future_user_vec.result()
             if user_vector is None:
+                logger.error(f"Failed to retrieve user vector for user {user_id} - aborting request")
                 return _error_response(f"Could not retrieve vector for user {user_id}")
+            logger.info(f"User vector retrieved successfully. Shape: {user_vector.shape}")
 
-            # Get cursors for this user and content type
-            user_cursors = self.cursor_tracker.get(user_id, {}).get("posts", {})
-            cursor = user_cursors.get("cursor")
-            high_quality_cursor = user_cursors.get("highQualityCursor")
+            # Get cursors — Redis-persisted state survives restarts; fall back to in-memory
+            persisted = self.pool_cache.load_cursor(user_id, "posts")
+            with self._cursor_lock:
+                mem = self.cursor_tracker.get(user_id, {}).get("posts", {})
+            cursor = mem.get("cursor") or persisted.get("cursor")
+            high_quality_cursor = mem.get("highQualityCursor") or persisted.get("highQualityCursor")
+            logger.info(f"Pagination state - cursor: {cursor}, highQualityCursor: {high_quality_cursor}")
 
-            # Fetch candidates
-            candidate_data = self._fetch_candidate_vectors(
-                user_id=user_id,
-                limit=limit * 2,  # Get more candidates for better selection
-                content_type="POSTS",
-                cursor=cursor,
-                high_quality_cursor=high_quality_cursor
-            )
+            pool_vectors = {}
+            if future_pool is not None:
+                try:
+                    pool_vectors = future_pool.result()
+                    logger.info(f"Pool pull: {len(pool_vectors)} unseen candidates available for user {user_id}")
+                except Exception as pool_err:
+                    logger.warning(f"Pool pull failed (non-fatal): {pool_err}")
 
+            # Fetch fresh candidates if pool doesn't have enough
+            if len(pool_vectors) >= fetch_limit:
+                logger.info(f"Serving from pool cache ({len(pool_vectors)} candidates, skip API call)")
+                candidate_data = {
+                    "vectors": pool_vectors,
+                    "nextCursor": cursor,
+                    "nextHighQualityCursor": high_quality_cursor,
+                    "hasMore": True,
+                    "hasMoreHighQuality": False,
+                    "distribution": {},
+                    "candidates": []
+                }
+            else:
+                logger.info(f"Fetching {fetch_limit} candidates from API (pool has {len(pool_vectors)})...")
+                candidate_data = self._fetch_candidate_vectors(
+                    user_id=user_id,
+                    limit=fetch_limit,
+                    content_type="POSTS",
+                    cursor=cursor,
+                    high_quality_cursor=high_quality_cursor
+                )
+                # Filter fresh candidates against shown set before merging
+                fresh_vectors = self.pool_cache.filter_shown(user_id, "posts", candidate_data["vectors"])
+                filtered_count = len(candidate_data["vectors"]) - len(fresh_vectors)
+                if filtered_count:
+                    logger.info(f"Filtered {filtered_count} already-shown posts from fresh API fetch")
+                # Fallback: if filtering exhausted all candidates, allow re-recommendation
+                if not fresh_vectors and candidate_data["vectors"]:
+                    logger.warning(f"All {filtered_count} fresh candidates already shown for user {user_id} — falling back to unfiltered set")
+                    fresh_vectors = candidate_data["vectors"]
+                candidate_data["vectors"] = fresh_vectors
+                # Merge pool candidates into fresh fetch (fresh wins on collision)
+                if pool_vectors:
+                    merged = dict(pool_vectors)
+                    merged.update(fresh_vectors)
+                    candidate_data["vectors"] = merged
+                    logger.info(f"Merged {len(pool_vectors)} pool + {len(fresh_vectors)} fresh = {len(merged)} total candidates")
+
+            candidate_count = len(candidate_data.get("vectors", {}))
             if not candidate_data["vectors"]:
-                logger.warning(f"No candidate vectors found for user {user_id}")
+                logger.warning(f"=== NO CANDIDATES FOUND for user {user_id} ===")
+                logger.warning(f"Candidate fetch returned empty result. Distribution: {candidate_data.get('distribution', {})}")
+                logger.warning(f"Cursor state at failure - cursor: {cursor}, highQualityCursor: {high_quality_cursor}")
                 return {
                     "postIds": [],
                     "scores": [],
@@ -465,6 +574,9 @@ class CoreRecommendationsService:
                     "processingTime": time.time() - start_time,
                     "message": "No candidates found"
                 }
+
+            logger.info(f"Fetched {candidate_count} candidates successfully")
+            logger.info(f"Candidate distribution: {candidate_data.get('distribution', {})}")
 
             # Score candidates using Two-Tower model with metadata enhancement
             scoring_result = self._score_candidates(
@@ -475,13 +587,20 @@ class CoreRecommendationsService:
             )
 
             # Take top results
+            total_scored = len(scoring_result["scored_posts"])
             top_results = scoring_result["scored_posts"][:limit]
             final_post_ids = [int(post_id) for post_id, _ in top_results]
             final_scores = [float(score) for _, score in top_results]
+            logger.info(f"Selected top {len(final_post_ids)} from {total_scored} scored candidates")
+
+            # Mark recommended posts as shown (fire-and-forget — doesn't affect response)
+            if self.pool_enabled and final_post_ids:
+                _executor.submit(self.pool_cache.mark_shown, user_id, "posts", final_post_ids)
 
             # Generate explanations
             explanations = []
             if include_explanations:
+                logger.info(f"Generating explanations for {len(final_post_ids)} recommendations...")
                 explanations = self._generate_explanations(
                     user_id=user_id,
                     post_ids=final_post_ids,
@@ -490,20 +609,27 @@ class CoreRecommendationsService:
                     rl_actions=scoring_result.get("rl_actions", []),
                     content_type="posts"
                 )
+                logger.info(f"Generated {len(explanations)} explanations")
+            else:
+                logger.info("Skipping explanation generation (disabled)")
 
+            processing_time = time.time() - start_time
             result = {
                 "postIds": final_post_ids,
                 "scores": final_scores,
                 "explanations": explanations,
                 "totalCount": len(final_post_ids),
-                "processingTime": time.time() - start_time,
+                "processingTime": processing_time,
                 "hasMore": candidate_data["hasMore"],
                 "nextCursor": candidate_data["nextCursor"],
                 "nextHighQualityCursor": candidate_data["nextHighQualityCursor"],
                 "distribution": candidate_data["distribution"]
             }
 
-            logger.info(f"Generated {len(final_post_ids)} post recommendations for user {user_id}")
+            logger.info(f"=== POST RECOMMENDATIONS COMPLETE for user {user_id} ===")
+            logger.info(f"Response summary - posts: {len(final_post_ids)}, processing_time: {processing_time:.3f}s")
+            logger.info(f"Score range: [{min(final_scores) if final_scores else 0:.4f}, {max(final_scores) if final_scores else 0:.4f}]")
+            logger.info(f"Pagination - hasMore: {candidate_data['hasMore']}, nextCursor: {candidate_data['nextCursor']}")
             return result
 
         except Exception as e:
@@ -518,28 +644,82 @@ class CoreRecommendationsService:
             self._update_jwt_token(jwt_token)
 
             start_time = time.time()
+            logger.info(f"=== TRAILER RECOMMENDATIONS REQUEST for user {user_id} ===")
+            logger.info(f"Request params - limit: {limit}, include_explanations: {include_explanations}")
 
-            # Get user vector
-            user_vector = self._get_user_vector(user_id)
+            # Fetch user vector and pool candidates in parallel (they are independent)
+            logger.info(f"Fetching user vector and pool candidates in parallel for user {user_id}...")
+            fetch_limit = limit * 2
+            future_user_vec = _executor.submit(self._get_user_vector, user_id)
+            future_pool = _executor.submit(
+                self.pool_cache.pull_candidates, user_id, "trailers"
+            ) if self.pool_enabled else None
+
+            user_vector = future_user_vec.result()
             if user_vector is None:
+                logger.error(f"Failed to retrieve user vector for user {user_id} - aborting request")
                 return _error_response(f"Could not retrieve vector for user {user_id}")
+            logger.info(f"User vector retrieved successfully. Shape: {user_vector.shape}")
 
-            # Get cursors for this user and content type
-            user_cursors = self.cursor_tracker.get(user_id, {}).get("trailers", {})
-            cursor = user_cursors.get("cursor")
-            high_quality_cursor = user_cursors.get("highQualityCursor")
+            # Get cursors — Redis-persisted state survives restarts; fall back to in-memory
+            persisted = self.pool_cache.load_cursor(user_id, "trailers")
+            with self._cursor_lock:
+                mem = self.cursor_tracker.get(user_id, {}).get("trailers", {})
+            cursor = mem.get("cursor") or persisted.get("cursor")
+            high_quality_cursor = mem.get("highQualityCursor") or persisted.get("highQualityCursor")
+            logger.info(f"Pagination state - cursor: {cursor}, highQualityCursor: {high_quality_cursor}")
 
-            # Fetch candidates
-            candidate_data = self._fetch_candidate_vectors(
-                user_id=user_id,
-                limit=limit * 2,
-                content_type="TRAILERS",
-                cursor=cursor,
-                high_quality_cursor=high_quality_cursor
-            )
+            pool_vectors = {}
+            if future_pool is not None:
+                try:
+                    pool_vectors = future_pool.result()
+                    logger.info(f"Pool pull: {len(pool_vectors)} unseen trailer candidates available for user {user_id}")
+                except Exception as pool_err:
+                    logger.warning(f"Pool pull failed (non-fatal): {pool_err}")
 
+            # Fetch fresh candidates if pool doesn't have enough
+            if len(pool_vectors) >= fetch_limit:
+                logger.info(f"Serving from pool cache ({len(pool_vectors)} trailer candidates, skip API call)")
+                candidate_data = {
+                    "vectors": pool_vectors,
+                    "nextCursor": cursor,
+                    "nextHighQualityCursor": high_quality_cursor,
+                    "hasMore": True,
+                    "hasMoreHighQuality": False,
+                    "distribution": {},
+                    "candidates": []
+                }
+            else:
+                logger.info(f"Fetching {fetch_limit} trailer candidates from API (pool has {len(pool_vectors)})...")
+                candidate_data = self._fetch_candidate_vectors(
+                    user_id=user_id,
+                    limit=fetch_limit,
+                    content_type="TRAILERS",
+                    cursor=cursor,
+                    high_quality_cursor=high_quality_cursor
+                )
+                # Filter fresh candidates against shown set before merging
+                fresh_vectors = self.pool_cache.filter_shown(user_id, "trailers", candidate_data["vectors"])
+                filtered_count = len(candidate_data["vectors"]) - len(fresh_vectors)
+                if filtered_count:
+                    logger.info(f"Filtered {filtered_count} already-shown trailers from fresh API fetch")
+                # Fallback: if filtering exhausted all candidates, allow re-recommendation
+                if not fresh_vectors and candidate_data["vectors"]:
+                    logger.warning(f"All {filtered_count} fresh trailer candidates already shown for user {user_id} — falling back to unfiltered set")
+                    fresh_vectors = candidate_data["vectors"]
+                candidate_data["vectors"] = fresh_vectors
+                # Merge pool candidates into fresh fetch (fresh wins on collision)
+                if pool_vectors:
+                    merged = dict(pool_vectors)
+                    merged.update(fresh_vectors)
+                    candidate_data["vectors"] = merged
+                    logger.info(f"Merged {len(pool_vectors)} pool + {len(fresh_vectors)} fresh = {len(merged)} total trailer candidates")
+
+            candidate_count = len(candidate_data.get("vectors", {}))
             if not candidate_data["vectors"]:
-                logger.warning(f"No trailer candidates found for user {user_id}")
+                logger.warning(f"=== NO TRAILER CANDIDATES FOUND for user {user_id} ===")
+                logger.warning(f"Candidate fetch returned empty result. Distribution: {candidate_data.get('distribution', {})}")
+                logger.warning(f"Cursor state at failure - cursor: {cursor}, highQualityCursor: {high_quality_cursor}")
                 return {
                     "postIds": [],
                     "scores": [],
@@ -548,6 +728,9 @@ class CoreRecommendationsService:
                     "processingTime": time.time() - start_time,
                     "message": "No trailer candidates found"
                 }
+
+            logger.info(f"Fetched {candidate_count} trailer candidates successfully")
+            logger.info(f"Candidate distribution: {candidate_data.get('distribution', {})}")
 
             # Score candidates using Two-Tower model with metadata enhancement
             scoring_result = self._score_candidates(
@@ -558,13 +741,20 @@ class CoreRecommendationsService:
             )
 
             # Take top results
+            total_scored = len(scoring_result["scored_posts"])
             top_results = scoring_result["scored_posts"][:limit]
             final_post_ids = [int(post_id) for post_id, _ in top_results]
             final_scores = [float(score) for _, score in top_results]
+            logger.info(f"Selected top {len(final_post_ids)} from {total_scored} scored trailer candidates")
+
+            # Mark recommended trailers as shown (fire-and-forget — doesn't affect response)
+            if self.pool_enabled and final_post_ids:
+                _executor.submit(self.pool_cache.mark_shown, user_id, "trailers", final_post_ids)
 
             # Generate explanations
             explanations = []
             if include_explanations:
+                logger.info(f"Generating explanations for {len(final_post_ids)} trailer recommendations...")
                 explanations = self._generate_explanations(
                     user_id=user_id,
                     post_ids=final_post_ids,
@@ -573,20 +763,27 @@ class CoreRecommendationsService:
                     rl_actions=scoring_result.get("rl_actions", []),
                     content_type="trailers"
                 )
+                logger.info(f"Generated {len(explanations)} explanations")
+            else:
+                logger.info("Skipping explanation generation (disabled)")
 
+            processing_time = time.time() - start_time
             result = {
                 "postIds": final_post_ids,
                 "scores": final_scores,
                 "explanations": explanations,
                 "totalCount": len(final_post_ids),
-                "processingTime": time.time() - start_time,
+                "processingTime": processing_time,
                 "hasMore": candidate_data["hasMore"],
                 "nextCursor": candidate_data["nextCursor"],
                 "nextHighQualityCursor": candidate_data["nextHighQualityCursor"],
                 "distribution": candidate_data["distribution"]
             }
 
-            logger.info(f"Generated {len(final_post_ids)} trailer recommendations for user {user_id}")
+            logger.info(f"=== TRAILER RECOMMENDATIONS COMPLETE for user {user_id} ===")
+            logger.info(f"Response summary - trailers: {len(final_post_ids)}, processing_time: {processing_time:.3f}s")
+            logger.info(f"Score range: [{min(final_scores) if final_scores else 0:.4f}, {max(final_scores) if final_scores else 0:.4f}]")
+            logger.info(f"Pagination - hasMore: {candidate_data['hasMore']}, nextCursor: {candidate_data['nextCursor']}")
             return result
 
         except Exception as e:
@@ -672,14 +869,30 @@ class CoreRecommendationsService:
                     "candidates": candidate_result.get("candidates", [])
                 }
 
-                # Update cursor tracker
-                if user_id not in self.cursor_tracker:
-                    self.cursor_tracker[user_id] = {}
+                # Update cursor tracker (memory + Redis so it survives restarts)
+                with self._cursor_lock:
+                    if user_id not in self.cursor_tracker:
+                        self.cursor_tracker[user_id] = {}
+                    self.cursor_tracker[user_id][content_type.lower()] = {
+                        "cursor": result["nextCursor"],
+                        "highQualityCursor": result["nextHighQualityCursor"]
+                    }
+                self.pool_cache.save_cursor(
+                    user_id, content_type.lower(),
+                    result["nextCursor"], result["nextHighQualityCursor"]
+                )
 
-                self.cursor_tracker[user_id][content_type.lower()] = {
-                    "cursor": result["nextCursor"],
-                    "highQualityCursor": result["nextHighQualityCursor"]
-                }
+                # Insert fresh candidates into the pool cache
+                if self.pool_enabled:
+                    try:
+                        pool_size = self.pool_cache.insert_candidates(
+                            user_id=user_id,
+                            content_type=content_type.lower(),
+                            new_vectors=converted_vectors
+                        )
+                        logger.info(f"Pool cache updated: {pool_size} total entries for user {user_id} [{content_type.lower()}]")
+                    except Exception as pool_err:
+                        logger.warning(f"Pool cache insert failed (non-fatal): {pool_err}")
 
                 logger.info(f"Successfully fetched {len(converted_vectors)} candidates for user {user_id}")
                 logger.info(f"Cursor info - Next: {result['nextCursor']}, HighQuality: {result['nextHighQualityCursor']}")
@@ -688,71 +901,141 @@ class CoreRecommendationsService:
 
             elif response.status_code == 204:  # No content
                 logger.info(f"No candidates available for user {user_id} (204 No Content)")
-                return {"vectors": {}, "nextCursor": None, "hasMore": False}
+                return {"vectors": {}, "nextCursor": None, "hasMore": False, "distribution": {}}
             else:
+                logger.warning(f"=== CANDIDATE FETCH FAILED for user {user_id} ===")
                 logger.warning(f"API returned status {response.status_code} for candidate vectors")
-                logger.warning(f"Error response content: {response.text}")
-                if response.status_code == 500:
-                    logger.error(f"Internal server error accessing candidates for user {user_id}")
-                    logger.error(f"Request details - URL: {url}, Params: {params}")
-                return {"vectors": {}, "nextCursor": None, "hasMore": False}
+                logger.warning(f"Request URL: {url}")
+                logger.warning(f"Request params: {params}")
+                logger.warning(f"Auth token present: {bool(auth_token)}")
+                try:
+                    error_body = response.text[:500] if response.text else "(empty response body)"
+                    logger.warning(f"Error response content: {error_body}")
+                except:
+                    logger.warning("Could not read error response body")
+
+                if response.status_code == 401:
+                    logger.error(f"Authentication failed (401) for candidate fetch - token may be expired or invalid")
+                    logger.error(f"Token present: {bool(auth_token)}, Headers sent: Authorization={'present' if 'Authorization' in headers else 'missing'}, X-Service-Role={'present' if 'X-Service-Role' in headers else 'missing'}")
+                elif response.status_code == 403:
+                    logger.error(f"Authorization failed (403) for candidate fetch - user {user_id} may lack permissions")
+                    logger.error(f"Token present: {bool(auth_token)}, Service role header: {headers.get('X-Service-Role', 'missing')}")
+                    logger.error(f"This may indicate: 1) Token lacks SERVICE role, 2) Endpoint requires different permissions, 3) Security filter blocking request")
+                elif response.status_code == 404:
+                    logger.warning(f"Candidate endpoint not found (404) - check API base URL: {self.api_base_url}")
+                elif response.status_code >= 500:
+                    logger.error(f"Server error ({response.status_code}) accessing candidates for user {user_id}")
+                    logger.error(f"This is a backend issue - check Spring service logs")
+
+                return {"vectors": {}, "nextCursor": None, "hasMore": False, "distribution": {}}
 
         except requests.exceptions.Timeout as e:
-            logger.error(f"Timeout error fetching candidate vectors for user {user_id}: {str(e)}")
+            logger.error(f"=== CANDIDATE FETCH TIMEOUT for user {user_id} ===")
             logger.error(f"Request timed out (connect=10s, read=60s) - URL: {url}")
-            return {"vectors": {}, "nextCursor": None, "hasMore": False}
+            logger.error(f"Timeout details: {str(e)}")
+            return {"vectors": {}, "nextCursor": None, "hasMore": False, "distribution": {}}
         except requests.exceptions.ConnectionError as e:
-            logger.error(f"Connection error fetching candidate vectors for user {user_id}: {str(e)}")
+            logger.error(f"=== CANDIDATE FETCH CONNECTION ERROR for user {user_id} ===")
             logger.error(f"Failed to connect to API endpoint: {url}")
-            return {"vectors": {}, "nextCursor": None, "hasMore": False}
+            logger.error(f"Connection error details: {str(e)}")
+            logger.error(f"Check that Spring API is running at {self.api_base_url}")
+            return {"vectors": {}, "nextCursor": None, "hasMore": False, "distribution": {}}
         except requests.exceptions.RequestException as e:
-            logger.error(f"Request error fetching candidate vectors for user {user_id}: {str(e)}")
-            logger.error(f"Request details - URL: {url}, Params: {params}")
-            return {"vectors": {}, "nextCursor": None, "hasMore": False}
+            logger.error(f"=== CANDIDATE FETCH REQUEST ERROR for user {user_id} ===")
+            logger.error(f"Request failed - URL: {url}, Params: {params}")
+            logger.error(f"Request error details: {str(e)}")
+            return {"vectors": {}, "nextCursor": None, "hasMore": False, "distribution": {}}
         except Exception as e:
-            logger.error(f"Unexpected error fetching candidate vectors for user {user_id}: {str(e)}", exc_info=True)
+            logger.error(f"=== CANDIDATE FETCH UNEXPECTED ERROR for user {user_id} ===")
             logger.error(f"Request context - URL: {url}, Content Type: {content_type}")
-            return {"vectors": {}, "nextCursor": None, "hasMore": False}
+            logger.error(f"Unexpected error: {str(e)}", exc_info=True)
+            return {"vectors": {}, "nextCursor": None, "hasMore": False, "distribution": {}}
 
     def _get_user_vector(self, user_id: str) -> Optional[np.ndarray]:
         """Get user vector from Redis or API"""
+        logger.debug(f"Fetching user vector for user {user_id}")
+
         # Try to get from Redis first
         redis_key = f"{self.user_vector_key_prefix}{user_id}"
-        cached_vector = self.redis_client.get(redis_key)
-
-        if cached_vector:
-            vector = np.frombuffer(cached_vector, dtype=np.float32)
-            return vector
+        try:
+            cached_vector = self.redis_client.get(redis_key)
+            if cached_vector:
+                vector = np.frombuffer(cached_vector, dtype=np.float32)
+                logger.debug(f"User vector cache hit for user {user_id}. Vector shape: {vector.shape}")
+                return vector
+            logger.debug(f"User vector cache miss for user {user_id}")
+        except Exception as redis_err:
+            logger.warning(f"Redis error while fetching user vector for {user_id}: {redis_err}")
 
         # Get from API if not in Redis
+        url = f"{self.api_base_url}/api/internal/ml/users/{user_id}/vector"
         try:
-            url = f"{self.api_base_url}/api/internal/ml/users/{user_id}/vector"
             headers = {}
             # Use current JWT token or fallback to environment token
             auth_token = self.current_jwt_token or os.environ.get('SERVICE_AUTH_TOKEN', '')
             if auth_token:
                 headers['Authorization'] = f'Bearer {auth_token}'
                 headers['X-Service-Role'] = 'SERVICE'
+
+            logger.debug(f"Fetching user vector from API: {url}")
             response = requests.get(url, headers=headers, timeout=5)
 
             if response.status_code == 200:
                 vector_data = response.json()
                 vector = np.array(vector_data, dtype=np.float32)
+                logger.info(f"Successfully fetched user vector from API for user {user_id}. Shape: {vector.shape}")
 
                 # Cache in Redis
-                self.redis_client.setex(redis_key, self.vector_cache_ttl, vector.tobytes())
+                try:
+                    self.redis_client.setex(redis_key, self.vector_cache_ttl, vector.tobytes())
+                    logger.debug(f"Cached user vector for user {user_id} with TTL {self.vector_cache_ttl}s")
+                except Exception as cache_err:
+                    logger.warning(f"Failed to cache user vector for user {user_id}: {cache_err}")
                 return vector
+            else:
+                logger.warning(f"=== USER VECTOR FETCH FAILED for user {user_id} ===")
+                logger.warning(f"API returned status {response.status_code}")
+                logger.warning(f"Request URL: {url}")
+                try:
+                    error_body = response.text[:500]  # Limit error body length
+                    logger.warning(f"Response body: {error_body}")
+                except:
+                    pass
+                if response.status_code == 404:
+                    logger.warning(f"User {user_id} not found in API - may be new user or invalid ID")
+                elif response.status_code == 401 or response.status_code == 403:
+                    logger.error(f"Authentication/Authorization failed for user vector request. Token present: {bool(auth_token)}")
+                elif response.status_code >= 500:
+                    logger.error(f"Server error from API while fetching user vector for user {user_id}")
 
+        except requests.exceptions.Timeout as e:
+            logger.error(f"=== USER VECTOR FETCH TIMEOUT for user {user_id} ===")
+            logger.error(f"Request timed out after 5s - URL: {url}")
+            logger.error(f"Timeout details: {str(e)}")
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"=== USER VECTOR FETCH CONNECTION ERROR for user {user_id} ===")
+            logger.error(f"Failed to connect to API endpoint: {url}")
+            logger.error(f"Connection error details: {str(e)}")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"=== USER VECTOR FETCH REQUEST ERROR for user {user_id} ===")
+            logger.error(f"Request failed - URL: {url}")
+            logger.error(f"Request error details: {str(e)}")
         except Exception as e:
-            logger.warning(f"Error retrieving user vector from API: {e}")
+            logger.error(f"=== USER VECTOR FETCH UNEXPECTED ERROR for user {user_id} ===")
+            logger.error(f"Unexpected error retrieving user vector from API: {e}", exc_info=True)
 
         # Return default vector if can't retrieve
-        logger.info(f"Using default vector for user {user_id}")
+        logger.warning(f"Using default (random) vector for user {user_id} - API fetch failed")
         feature_dim = int(os.environ.get('USER_FEATURE_DIM', '64'))
         default_vector = np.random.rand(feature_dim).astype(np.float32)
+        logger.info(f"Generated default vector with dimension {feature_dim} for user {user_id}")
 
         # Cache default vector
-        self.redis_client.setex(redis_key, self.vector_cache_ttl, default_vector.tobytes())
+        try:
+            self.redis_client.setex(redis_key, self.vector_cache_ttl, default_vector.tobytes())
+            logger.debug(f"Cached default vector for user {user_id}")
+        except Exception as cache_err:
+            logger.warning(f"Failed to cache default vector for user {user_id}: {cache_err}")
         return default_vector
 
     def _score_candidates(self, user_id: str, user_vector: np.ndarray,
@@ -760,53 +1043,80 @@ class CoreRecommendationsService:
         """
         Score candidate posts using the Two-Tower model with metadata enhancement.
 
+        TMDB ToS Compliant Pipeline:
+        1. Two-Tower ML scoring (behavioral embeddings)
+        2. Eligibility filtering (TMDB boolean pass/fail)
+        3. Behavioral boost (app engagement data only)
+        4. Diversity reranking (TMDB genre for ordering only)
+
         Returns:
             Dict containing:
                 - scored_posts: List of (post_id, final_score) tuples sorted by score
                 - base_scores: Dict mapping post_id to base ML score
                 - enhanced_scores: Dict mapping post_id to final enhanced score
                 - rl_actions: List of RL actions taken (if RL active)
+                - filtered_posts: List of post IDs filtered out (TMDB ToS compliant)
+                - diversity_applied: Boolean indicating diversity reranking was applied
         """
+        logger.info(f"=== CANDIDATE SCORING START for user {user_id} ===")
+        logger.info(f"Content type: {content_type}")
+        logger.info(f"Input candidate count: {len(candidate_data.get('vectors', {}))}")
+        logger.info(f"User vector shape: {user_vector.shape if user_vector is not None else 'None'}")
+
         result = {
             "scored_posts": [],
             "base_scores": {},
             "enhanced_scores": {},
-            "rl_actions": []
+            "rl_actions": [],
+            "filtered_posts": [],
+            "diversity_applied": False
         }
 
         if not self.two_tower_model:
             logger.warning("TwoTower model not available, using fallback scoring")
+            logger.warning(f"Fallback: Assigning random scores to {len(candidate_data.get('vectors', {}))} candidates")
             post_ids = list(candidate_data["vectors"].keys())
             for post_id in post_ids:
                 score = float(np.random.random())
                 result["base_scores"][post_id] = score
                 result["enhanced_scores"][post_id] = score
             result["scored_posts"] = [(pid, result["enhanced_scores"][pid]) for pid in post_ids]
+            logger.info(f"Fallback scoring complete: {len(result['scored_posts'])} candidates scored")
             return result
 
         try:
             vectors = candidate_data["vectors"]
             candidates = candidate_data.get("candidates", [])
+            logger.info(f"Processing {len(vectors)} candidate vectors with {len(candidates)} candidate metadata entries")
 
             if not vectors:
+                logger.warning(f"No candidate vectors to score for user {user_id}")
                 return result
 
             # Prepare data for scoring
             post_ids = list(vectors.keys())
             post_vectors = list(vectors.values())
             post_vectors_array = np.array(post_vectors)
+            logger.info(f"Prepared {len(post_ids)} candidates for Two-Tower scoring")
+            logger.debug(f"Candidate post IDs: {post_ids[:10]}{'...' if len(post_ids) > 10 else ''}")
+            logger.debug(f"Post vectors array shape: {post_vectors_array.shape}")
 
             # Reshape user vector for batch processing
             user_batch = np.expand_dims(user_vector, axis=0)
+            logger.debug(f"User batch shape: {user_batch.shape}")
 
             # Calculate base scores using Two-Tower model
+            logger.info(f"Computing Two-Tower base scores for {len(post_ids)} candidates...")
             base_scores_array = compute_scores(user_batch, post_vectors_array, content_type)
+            logger.info(f"Two-Tower scoring complete. Score range: [{base_scores_array.min():.4f}, {base_scores_array.max():.4f}]")
+            logger.info(f"Mean base score: {base_scores_array.mean():.4f}, Std: {base_scores_array.std():.4f}")
 
             # Store base scores
             for i, post_id in enumerate(post_ids):
                 result["base_scores"][post_id] = float(base_scores_array[0][i])
 
-            # Apply metadata enhancement
+            # Apply COMPLIANT metadata enhancement (eligibility filter + behavioral boost)
+            logger.info(f"Applying metadata enhancement to {len(post_ids)} candidates...")
             enhanced_scores = self.metadata_enhancer.enhance_scores(
                 user_id=user_id,
                 post_ids=post_ids,
@@ -814,10 +1124,23 @@ class CoreRecommendationsService:
                 candidates=candidates,
                 content_type=content_type
             )
+            logger.info(f"Metadata enhancement complete. Enhanced score range: [{enhanced_scores.min():.4f}, {enhanced_scores.max():.4f}]")
+            logger.info(f"Mean enhanced score: {enhanced_scores.mean():.4f}, Std: {enhanced_scores.std():.4f}")
 
             # Store enhanced scores
             for i, post_id in enumerate(post_ids):
                 result["enhanced_scores"][post_id] = float(enhanced_scores[i])
+
+            # Track filtered posts (score = 0 after eligibility filtering)
+            result["filtered_posts"] = self.metadata_enhancer.get_filtered_posts(
+                post_ids, enhanced_scores
+            )
+            filtered_count = len(result["filtered_posts"])
+            if filtered_count > 0:
+                logger.info(f"Eligibility filtering removed {filtered_count} candidates (score=0)")
+                logger.debug(f"Filtered post IDs: {result['filtered_posts'][:10]}{'...' if filtered_count > 10 else ''}")
+            else:
+                logger.info(f"Eligibility filtering: All {len(post_ids)} candidates passed")
 
             # Get RL actions if available
             if hasattr(self.metadata_enhancer, 'rl_manager'):
@@ -826,27 +1149,59 @@ class CoreRecommendationsService:
                     user_pending = pending.get(str(user_id), {})
                     if user_pending and 'action' in user_pending:
                         result["rl_actions"] = [user_pending['action'].to_dict()]
+                        logger.info(f"RL action applied for user {user_id}: {result['rl_actions']}")
+                    else:
+                        logger.debug(f"No pending RL actions for user {user_id}")
                 except Exception as e:
                     logger.debug(f"Could not retrieve RL actions: {e}")
+            else:
+                logger.debug("RL manager not available - skipping RL action retrieval")
 
-            # Combine post IDs with enhanced scores
-            scored_posts = list(zip(post_ids, enhanced_scores))
+            # Apply diversity reranking (TMDB genre for ordering only - ToS compliant)
+            logger.info(f"Applying diversity reranking to {len(post_ids)} candidates...")
+            reranked_ids, reranked_scores = self.metadata_enhancer.apply_diversity_reranking(
+                post_ids, enhanced_scores
+            )
 
-            # Sort by score (descending)
-            scored_posts.sort(key=lambda x: x[1], reverse=True)
-            result["scored_posts"] = scored_posts
+            if len(reranked_ids) > 0:
+                result["diversity_applied"] = True
+                # Use reranked results
+                result["scored_posts"] = list(zip(reranked_ids, reranked_scores.tolist()))
+                logger.info(f"Diversity reranking applied: {len(reranked_ids)} candidates reordered")
+            else:
+                # Fallback to score-sorted order
+                scored_posts = list(zip(post_ids, enhanced_scores))
+                scored_posts.sort(key=lambda x: x[1], reverse=True)
+                result["scored_posts"] = scored_posts
+                logger.info(f"Diversity reranking not applied - using score-sorted order for {len(scored_posts)} candidates")
+
+            # Log final scoring summary
+            remaining_candidates = len(result["scored_posts"])
+            logger.info(f"=== CANDIDATE SCORING COMPLETE for user {user_id} ===")
+            logger.info(f"Scoring pipeline summary:")
+            logger.info(f"  - Input candidates: {len(post_ids)}")
+            logger.info(f"  - Filtered out: {filtered_count}")
+            logger.info(f"  - Final candidates: {remaining_candidates}")
+            logger.info(f"  - Diversity applied: {result['diversity_applied']}")
+            if remaining_candidates > 0:
+                top_5_posts = result["scored_posts"][:5]
+                logger.info(f"  - Top 5 scored posts: {[(pid, f'{score:.4f}') for pid, score in top_5_posts]}")
 
             return result
 
         except Exception as e:
+            logger.error(f"=== CANDIDATE SCORING FAILED for user {user_id} ===")
             logger.error(f"Error scoring candidates: {e}", exc_info=True)
+            logger.error(f"Failure context - Content type: {content_type}, Candidate count: {len(candidate_data.get('vectors', {}))}")
             # Fallback to random scores
             post_ids = list(candidate_data["vectors"].keys())
+            logger.warning(f"Fallback: Assigning random scores to {len(post_ids)} candidates after scoring failure")
             for post_id in post_ids:
                 score = float(np.random.random())
                 result["base_scores"][post_id] = score
                 result["enhanced_scores"][post_id] = score
             result["scored_posts"] = [(pid, result["enhanced_scores"][pid]) for pid in post_ids]
+            logger.info(f"Fallback scoring complete: {len(result['scored_posts'])} candidates scored with random values")
             return result
 
     def _generate_explanations(self, user_id: str, post_ids: List[int],
@@ -1034,6 +1389,9 @@ class CoreRecommendationsService:
     def get_service_stats(self) -> Dict[str, Any]:
         """Get service statistics including RL stats"""
         try:
+            with self._cursor_lock:
+                cursors_tracked_count = len(self.cursor_tracker)
+
             base_stats = {
                 "modelLoaded": self.two_tower_model is not None,
                 "cacheStatus": {
@@ -1044,8 +1402,25 @@ class CoreRecommendationsService:
                     "commentService": self.comment_service_url,
                     "apiBaseUrl": self.api_base_url
                 },
-                "cursorsTracked": len(self.cursor_tracker),
+                "cursorsTracked": cursors_tracked_count,
                 "version": os.environ.get("SERVICE_VERSION", "1.1.0")
+            }
+
+            # Candidate pool stats
+            with self._cursor_lock:
+                cursors_tracked = len(self.cursor_tracker)
+                cursor_user_sample = list(self.cursor_tracker.keys())[:10]
+            base_stats["candidatePool"] = {
+                "enabled": self.pool_enabled,
+                "cap": 200,
+                "usersTracked": cursors_tracked,
+                "poolSizes": {
+                    uid: {
+                        ct: self.pool_cache.get_pool_size(uid, ct)
+                        for ct in ["posts", "trailers"]
+                    }
+                    for uid in cursor_user_sample
+                }
             }
 
             # Check RL status

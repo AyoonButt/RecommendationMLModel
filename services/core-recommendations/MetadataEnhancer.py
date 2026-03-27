@@ -2,8 +2,9 @@ import time
 import logging
 import requests
 import numpy as np
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from collections import defaultdict
+from DiversityEnforcer import create_diversity_enforcer
 
 logger = logging.getLogger("metadata-enhancer")
 
@@ -27,6 +28,9 @@ class MetadataEnhancer:
         self.redis_client = redis_client
         self.cache_ttl = cache_ttl
 
+        # JWT token for API authentication (can be updated via set_jwt_token)
+        self._jwt_token = None
+
         # In-memory cache for when Redis is not available
         self.memory_cache = {}
         self.cache_timestamps = {}
@@ -37,6 +41,28 @@ class MetadataEnhancer:
         self.popularity_boost_factor = 0.15  # Up to 15% boost for popular content
         self.recency_boost_factor = 0.25  # Enhanced: Up to 25% boost for recent content
         self.cast_crew_boost_factor = 0.20  # NEW: Up to 20% boost for cast/crew preferences
+
+        self.diversity_enforcer = create_diversity_enforcer(
+            max_consecutive_same_genre=2,
+            new_release_positions=[0, 5, 10],
+            hidden_gem_positions=[3, 8]
+        )
+
+    def set_jwt_token(self, token: str):
+        """Update the JWT token used for API authentication."""
+        self._jwt_token = token
+        logger.debug(f"MetadataEnhancer JWT token updated (length: {len(token) if token else 0})")
+
+    def _get_auth_headers(self) -> Dict[str, str]:
+        """Get authentication headers for API requests."""
+        import os
+        headers = {}
+        # Use instance token first, then fall back to environment variable
+        auth_token = self._jwt_token or os.environ.get('SERVICE_AUTH_TOKEN', '')
+        if auth_token:
+            headers['Authorization'] = f'Bearer {auth_token}'
+            headers['X-Service-Role'] = 'SERVICE'
+        return headers
 
     def enhance_scores(self, user_id: str, post_ids: List[int], base_scores: np.ndarray,
                        candidates: List[Dict] = None, content_type: str = "posts") -> np.ndarray:
@@ -467,11 +493,7 @@ class MetadataEnhancer:
 
             # Add service authentication headers
             headers = {'Content-Type': 'application/json'}
-            import os
-            auth_token = os.environ.get('SERVICE_AUTH_TOKEN', '')
-            if auth_token:
-                headers['Authorization'] = f'Bearer {auth_token}'
-                headers['X-Service-Role'] = 'SERVICE'
+            headers.update(self._get_auth_headers())
 
             response = requests.post(url, json=post_ids, headers=headers, timeout=10)
 
@@ -557,12 +579,7 @@ class MetadataEnhancer:
                 return None
 
             # Add service authentication headers
-            headers = {}
-            import os
-            auth_token = os.environ.get('SERVICE_AUTH_TOKEN', '')
-            if auth_token:
-                headers['Authorization'] = f'Bearer {auth_token}'
-                headers['X-Service-Role'] = 'SERVICE'
+            headers = self._get_auth_headers()
 
             response = requests.get(url, headers=headers, timeout=5)
 
@@ -622,6 +639,41 @@ class MetadataEnhancer:
                 "message": "Standard metadata enhancement active"
             }
         }
+
+    def apply_diversity_reranking(self, post_ids: List[int],
+                                  scores: np.ndarray) -> Tuple[List[int], np.ndarray]:
+        """Apply diversity reranking to scored posts without modifying scores."""
+        try:
+            non_zero_mask = scores > 0.0
+            valid_post_ids = [pid for i, pid in enumerate(post_ids) if non_zero_mask[i]]
+            valid_scores = scores[non_zero_mask]
+
+            if len(valid_post_ids) == 0:
+                return [], np.array([])
+
+            metadata_map = {}
+            for post_id in valid_post_ids:
+                metadata = self._get_cached_metadata(f"post:{post_id}")
+                if metadata:
+                    metadata_map[post_id] = metadata
+
+            ranked_posts = list(zip(valid_post_ids, valid_scores.tolist()))
+            ranked_posts.sort(key=lambda x: x[1], reverse=True)
+
+            reranked = self.diversity_enforcer.apply_diversity(ranked_posts, metadata_map)
+
+            reranked_ids = [pid for pid, _ in reranked]
+            reranked_scores = np.array([score for _, score in reranked], dtype=np.float32)
+
+            return reranked_ids, reranked_scores
+
+        except Exception as e:
+            logger.warning(f"Error applying diversity reranking: {e}")
+            return list(post_ids), scores
+
+    def get_filtered_posts(self, post_ids: List[int], scores: np.ndarray) -> List[int]:
+        """Get list of posts that were filtered out (score = 0)."""
+        return [pid for i, pid in enumerate(post_ids) if scores[i] == 0.0]
 
     def clear_cache(self):
         """Clear all cached metadata."""

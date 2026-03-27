@@ -558,3 +558,7 @@ class RLEnhancedMetadataEnhancer:
                 final_posts.append(enhanced_post)
         
         return final_posts
+    
+    def get_filtered_posts(self, post_ids: List[int], scores: np.ndarray) -> List[int]:
+        """Delegate to original enhancer's get_filtered_posts."""
+        return self.original_enhancer.get_filtered_posts(post_ids, scores)

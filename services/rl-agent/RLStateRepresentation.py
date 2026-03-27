@@ -333,84 +333,288 @@ class RLStateBuilder:
         ], dtype=np.float32)
     
     def _build_user_preference_vector(self, user_id: int, context: Dict[str, Any]) -> np.ndarray:
-        """Build user preference vector from metadata."""
-        user_metadata = context.get('user_metadata', {})
-        
-        # Genre preferences (top 8 genres)
-        genre_prefs = user_metadata.get('interestWeights', {})
-        top_genres = sorted(genre_prefs.items(), key=lambda x: x[1], reverse=True)[:8]
-        genre_vector = [pref for _, pref in top_genres]
-        genre_vector.extend([0.0] * (8 - len(genre_vector)))  # Pad to 8
-        
-        # Language preferences (top 4 languages)
-        lang_weights = user_metadata.get('languageWeights', {}).get('weights', {})
-        top_langs = sorted(lang_weights.items(), key=lambda x: x[1], reverse=True)[:4]
-        lang_vector = [weight for _, weight in top_langs]
-        lang_vector.extend([0.0] * (4 - len(lang_vector)))  # Pad to 4
-        
-        # Cast/crew preferences (summarized)
-        cast_crew_prefs = user_metadata.get('castCrewPreferences', {})
-        cast_pref_count = len(cast_crew_prefs.get('castPreferences', {}))
-        crew_pref_count = len(cast_crew_prefs.get('crewPreferences', {}))
-        cast_crew_vector = [
-            min(1.0, cast_pref_count / 20.0),  # Normalize by max expected
-            min(1.0, crew_pref_count / 15.0)   # Normalize by max expected
-        ]
-        
-        # Other preferences
-        categorical_features = user_metadata.get('categoricalFeatures', {})
-        region_encoded = self._encode_categorical(categorical_features.get('region', 'unknown'), 
-                                                 ['US', 'CA', 'UK', 'EU', 'other'])
-        
-        preference_vector = np.array(
-            genre_vector + lang_vector + cast_crew_vector + region_encoded,
-            dtype=np.float32
-        )
-        
+        """
+        Build user preference vector from BEHAVIORAL data only.
+
+        TMDB ToS Compliant: This method derives all features from user interactions
+        within the app, NOT from TMDB metadata like interestWeights or castCrewPreferences.
+
+        Behavioral features (16D total):
+        - 8D: Genre preferences from interaction patterns (likes/saves vs skips)
+        - 4D: Language preferences from interaction history
+        - 2D: Engagement patterns (depth, positive_ratio)
+        - 2D: Recency features (recent_rate, velocity)
+        """
+        interaction_history = list(self.user_interaction_patterns[user_id])
+
+        # 8D: Genre preferences from behavioral interaction patterns
+        genre_scores = self._calc_behavioral_genre_prefs(interaction_history)
+
+        # 4D: Language preferences from interactions
+        language_scores = self._calc_behavioral_language_prefs(interaction_history)
+
+        # 2D: Engagement patterns (depth, positive_ratio)
+        engagement_patterns = self._calc_engagement_patterns(interaction_history)
+
+        # 2D: Recency features (recent_rate, velocity)
+        recency_features = self._calc_recency_features(interaction_history)
+
+        preference_vector = np.concatenate([
+            genre_scores, language_scores, engagement_patterns, recency_features
+        ]).astype(np.float32)
+
         # Pad or truncate to desired dimension
         if len(preference_vector) > self.user_preference_dim:
             preference_vector = preference_vector[:self.user_preference_dim]
         else:
             padding = np.zeros(self.user_preference_dim - len(preference_vector))
             preference_vector = np.concatenate([preference_vector, padding])
-        
+
         return preference_vector
+
+    def _calc_behavioral_genre_prefs(self, history: List[Dict]) -> np.ndarray:
+        """
+        Calculate genre preferences from behavioral data (likes/saves vs skips).
+
+        TMDB ToS Compliant: Uses interaction types, not TMDB metadata.
+        """
+        genre_engagement = defaultdict(lambda: {'pos': 0, 'neg': 0, 'total': 0})
+
+        for interaction in history:
+            # Get genres from the interaction record (stored at interaction time)
+            for genre in interaction.get('genres', []):
+                genre_engagement[genre]['total'] += 1
+                if interaction.get('type') in ['like', 'save', 'share']:
+                    genre_engagement[genre]['pos'] += 1
+                elif interaction.get('type') in ['not_interested', 'skip']:
+                    genre_engagement[genre]['neg'] += 1
+
+        # Score = (pos - neg) / total, normalized to [0, 1]
+        prefs = {}
+        for g, c in genre_engagement.items():
+            if c['total'] > 0:
+                prefs[g] = (c['pos'] - c['neg']) / max(1, c['total']) / 2 + 0.5
+
+        # Get top 8 genres by preference score
+        top_8 = sorted(prefs.items(), key=lambda x: x[1], reverse=True)[:8]
+        result = [p for _, p in top_8] + [0.5] * (8 - len(top_8))
+        return np.array(result, dtype=np.float32)
+
+    def _calc_behavioral_language_prefs(self, history: List[Dict]) -> np.ndarray:
+        """
+        Calculate language preferences from behavioral data.
+
+        TMDB ToS Compliant: Uses interaction language data, not TMDB languageWeights.
+        """
+        lang_engagement = defaultdict(lambda: {'pos': 0, 'total': 0})
+
+        for interaction in history:
+            lang = interaction.get('language', 'en')
+            lang_engagement[lang]['total'] += 1
+            if interaction.get('type') in ['like', 'save', 'share', 'more_info']:
+                lang_engagement[lang]['pos'] += 1
+
+        # Calculate preference scores
+        prefs = {}
+        for lang, counts in lang_engagement.items():
+            if counts['total'] > 0:
+                prefs[lang] = counts['pos'] / counts['total']
+
+        # Get top 4 languages
+        top_4 = sorted(prefs.items(), key=lambda x: x[1], reverse=True)[:4]
+        result = [p for _, p in top_4] + [0.0] * (4 - len(top_4))
+        return np.array(result, dtype=np.float32)
+
+    def _calc_engagement_patterns(self, history: List[Dict]) -> np.ndarray:
+        """
+        Calculate engagement patterns from behavioral data.
+
+        Returns 2D: [engagement_depth, positive_ratio]
+        """
+        if not history:
+            return np.array([0.5, 0.5], dtype=np.float32)
+
+        # Engagement depth: variety of interaction types
+        interaction_types = set(h.get('type', 'unknown') for h in history)
+        depth = min(1.0, len(interaction_types) / 5.0)  # Normalize by expected variety
+
+        # Positive ratio: positive vs negative interactions
+        positive = sum(1 for h in history if h.get('type') in ['like', 'save', 'share', 'more_info'])
+        negative = sum(1 for h in history if h.get('type') in ['not_interested', 'skip'])
+        total = positive + negative
+        positive_ratio = positive / total if total > 0 else 0.5
+
+        return np.array([depth, positive_ratio], dtype=np.float32)
+
+    def _calc_recency_features(self, history: List[Dict]) -> np.ndarray:
+        """
+        Calculate recency features from behavioral data.
+
+        Returns 2D: [recent_rate, velocity]
+        """
+        if len(history) < 2:
+            return np.array([0.5, 0.5], dtype=np.float32)
+
+        current_time = time.time()
+
+        # Recent rate: proportion of interactions in last hour
+        recent_count = sum(1 for h in history
+                         if current_time - h.get('timestamp', 0) < 3600)
+        recent_rate = min(1.0, recent_count / max(1, len(history)))
+
+        # Velocity: interaction frequency trend
+        # Compare recent interactions to older interactions
+        recent_interactions = [h for h in history
+                             if current_time - h.get('timestamp', 0) < 3600]
+        older_interactions = [h for h in history
+                             if current_time - h.get('timestamp', 0) >= 3600]
+
+        if len(recent_interactions) > 0 and len(older_interactions) > 0:
+            # Calculate time between interactions for each group
+            velocity = min(1.0, len(recent_interactions) / len(older_interactions))
+        else:
+            velocity = 0.5
+
+        return np.array([recent_rate, velocity], dtype=np.float32)
     
     def _build_content_features(self, post_id: int, context: Dict[str, Any]) -> np.ndarray:
-        """Build content-specific features."""
+        """
+        Build content-specific features from BEHAVIORAL data only.
+
+        TMDB ToS Compliant: This method derives features from app behavioral data,
+        NOT from TMDB metadata like voteAverage, popularity, genreWeights.
+
+        Behavioral features (12D total):
+        - 4D: Comment-based features (sentiment from app comment analysis)
+        - 4D: Interaction rates (clicks, like_rate, save_rate, share_rate)
+        - 4D: Engagement velocity (recent activity trends)
+        """
         post_metadata = context.get('post_metadata', {})
-        
-        # Basic content features
-        vote_average = post_metadata.get('voteAverage', 5.0) / 10.0  # Normalize to 0-1
-        vote_count = min(1.0, post_metadata.get('voteCount', 0) / 1000.0)  # Normalize
-        popularity = min(1.0, post_metadata.get('popularity', 0) / 100.0)  # Normalize
-        
-        # Content type encoding
-        content_type = context.get('content_type', 'unknown')
-        content_type_encoded = self._encode_categorical(content_type, ['posts', 'trailers', 'other'])
-        
-        # Genre features (top 5 genres for this content)
-        genre_weights = post_metadata.get('genreWeights', {})
-        top_content_genres = sorted(genre_weights.items(), key=lambda x: x[1], reverse=True)[:5]
-        genre_vector = [weight for _, weight in top_content_genres]
-        genre_vector.extend([0.0] * (5 - len(genre_vector)))  # Pad to 5
-        
-        # Engagement features
-        info_clicks = post_metadata.get('infoButtonClicks', {})
-        click_count = min(1.0, info_clicks.get('count', 0) / 100.0)  # Normalize
-        
-        content_features = np.array([
-            vote_average, vote_count, popularity, click_count
-        ] + content_type_encoded + genre_vector, dtype=np.float32)
-        
+
+        # 4D: Comment-based features (sentiment from app's comment analysis)
+        comment_features = self._get_comment_features(post_id, post_metadata)
+
+        # 4D: Interaction rates (app behavioral data, NOT TMDB)
+        interaction_features = self._get_interaction_rates(post_metadata)
+
+        # 4D: Engagement velocity (recent activity trends from app)
+        velocity_features = self._get_engagement_velocity(post_metadata)
+
+        content_features = np.concatenate([
+            comment_features, interaction_features, velocity_features
+        ]).astype(np.float32)
+
         # Ensure correct dimension
         if len(content_features) > self.content_features_dim:
             content_features = content_features[:self.content_features_dim]
         else:
             padding = np.zeros(self.content_features_dim - len(content_features))
             content_features = np.concatenate([content_features, padding])
-        
+
         return content_features
+
+    def _get_comment_features(self, post_id: int, post_metadata: Dict) -> np.ndarray:
+        """
+        Get comment-based features from app's comment analysis.
+
+        Returns 4D: [sentiment_score, comment_activity, controversy_score, helpfulness]
+        """
+        # Comment analysis from app (NOT TMDB)
+        comment_analysis = post_metadata.get('commentAnalysis', {})
+
+        if comment_analysis:
+            sentiment = comment_analysis.get('averageSentiment', 0.5)
+            activity = min(1.0, comment_analysis.get('commentCount', 0) / 100.0)
+            controversy = comment_analysis.get('controversyScore', 0.0)
+            helpfulness = comment_analysis.get('helpfulnessScore', 0.5)
+        else:
+            sentiment = 0.5
+            activity = 0.0
+            controversy = 0.0
+            helpfulness = 0.5
+
+        return np.array([sentiment, activity, controversy, helpfulness], dtype=np.float32)
+
+    def _get_interaction_rates(self, post_metadata: Dict) -> np.ndarray:
+        """
+        Get interaction rates from app behavioral data.
+
+        Returns 4D: [click_rate, like_rate, save_rate, share_rate]
+
+        TMDB ToS Compliant: All metrics from app interactions, NOT TMDB.
+        """
+        # Info button clicks (app engagement metric)
+        info_clicks = post_metadata.get('infoButtonClicks', {})
+        click_count = info_clicks.get('count', 0) if isinstance(info_clicks, dict) else 0
+        clicks = min(1.0, click_count / 100.0)
+
+        # View count for calculating rates
+        views = max(1, post_metadata.get('viewCount', 1))
+
+        # Interaction rates from app data
+        like_rate = min(1.0, post_metadata.get('likeCount', 0) / views)
+        save_rate = min(1.0, post_metadata.get('saveCount', 0) / views)
+        share_rate = min(1.0, post_metadata.get('shareCount', 0) / views)
+
+        return np.array([clicks, like_rate, save_rate, share_rate], dtype=np.float32)
+
+    def _get_engagement_velocity(self, post_metadata: Dict) -> np.ndarray:
+        """
+        Get engagement velocity features (recent activity trends).
+
+        Returns 4D: [is_trending, hourly_velocity, daily_velocity, velocity_trend]
+
+        TMDB ToS Compliant: All from app behavioral data.
+
+        Supports two velocity data formats:
+        1. Legacy: recentEngagement with likesLast24h, savesLast24h, etc.
+        2. New: engagementVelocity with isTrending, hourlyVelocity, dailyVelocity
+        """
+        # Try new velocity data format first (from /posts/{postId}/engagement-velocity endpoint)
+        engagement_velocity = post_metadata.get('engagementVelocity', {})
+
+        if engagement_velocity:
+            # New format with explicit trending and velocity data
+            is_trending = 1.0 if engagement_velocity.get('isTrending', False) else 0.0
+            hourly_velocity = min(1.0, engagement_velocity.get('hourlyVelocity', 0.0) / 10.0)
+            daily_velocity = min(1.0, engagement_velocity.get('dailyVelocity', 0.0) / 100.0)
+
+            # Velocity trend: compare hourly vs daily
+            hourly = engagement_velocity.get('hourlyVelocity', 0.0)
+            daily = engagement_velocity.get('dailyVelocity', 0.0)
+            if daily > 0:
+                velocity_trend = min(1.0, hourly / (daily / 24))  # How today's trend compares to daily avg
+            else:
+                velocity_trend = 0.5
+
+            return np.array([is_trending, hourly_velocity, daily_velocity, velocity_trend],
+                           dtype=np.float32)
+
+        # Fallback to legacy format
+        recent_engagement = post_metadata.get('recentEngagement', {})
+
+        if recent_engagement:
+            # Derive trending indicator from engagement trends
+            likes_24h = recent_engagement.get('likesLast24h', 0)
+            saves_24h = recent_engagement.get('savesLast24h', 0)
+            comments_24h = recent_engagement.get('commentsLast24h', 0)
+
+            # Estimated trending based on engagement volume
+            is_trending = 1.0 if (likes_24h + saves_24h + comments_24h) > 50 else 0.0
+
+            like_velocity = min(1.0, likes_24h / 50.0)
+            save_velocity = min(1.0, saves_24h / 20.0)
+            comment_velocity = min(1.0, comments_24h / 30.0)
+            trend_score = recent_engagement.get('trendScore', 0.5)
+
+            # Combine into 4D: is_trending, avg_velocity, max_velocity, trend_score
+            avg_velocity = (like_velocity + save_velocity + comment_velocity) / 3.0
+            max_velocity = max(like_velocity, save_velocity, comment_velocity)
+
+            return np.array([is_trending, avg_velocity, max_velocity, trend_score],
+                           dtype=np.float32)
+        else:
+            return np.array([0.0, 0.0, 0.0, 0.5], dtype=np.float32)
     
     def _build_social_signals(self, user_id: int, post_id: int, context: Dict[str, Any]) -> np.ndarray:
         """Build social influence features."""
