@@ -204,8 +204,12 @@ class CoreRecommendationsService:
         self.social_client = ServiceClient(self.social_service_url)
         self.comment_client = ServiceClient(self.comment_service_url)
 
-        # Authenticate with Spring API
-        self._login_to_api()
+        # Use SERVICE_AUTH_TOKEN from environment for authentication
+        self.current_jwt_token = os.environ.get('SERVICE_AUTH_TOKEN')
+        if self.current_jwt_token:
+            logger.info("Using SERVICE_AUTH_TOKEN from environment for authentication")
+        else:
+            logger.warning("SERVICE_AUTH_TOKEN not set in environment")
 
         # Redis configuration
         redis_host = os.environ.get('REDIS_HOST', 'localhost')
@@ -259,33 +263,10 @@ class CoreRecommendationsService:
         self.pool_cache = CandidatePoolCache(self.redis_client, pool_ttl=pool_ttl)
         logger.info(f"Candidate pool cache initialized (enabled={self.pool_enabled}, ttl={pool_ttl}s, cap=200)")
 
-        # Initialize service token manager
+        # Token manager for compatibility (now just reads from env var)
         self.token_manager = None
         if get_service_token_manager:
-            try:
-                self.token_manager = get_service_token_manager("core-recommendations")
-                # Try to get token from API
-                if self.token_manager.request_service_token(self.api_base_url):
-                    logger.info("Successfully obtained service token from API")
-                    # Update current JWT token with the new one from API
-                    self.current_jwt_token = self.token_manager.get_access_token()
-                else:
-                    logger.warning("Could not obtain service token from API, falling back to environment variable")
-                    # Fall back to environment variable
-                    env_token = os.environ.get('SERVICE_AUTH_TOKEN')
-                    if env_token:
-                        self.current_jwt_token = env_token
-                        logger.info("Using service token from environment variable")
-                    else:
-                        logger.error("No service token available from API or environment")
-                logger.info("Service token manager initialized")
-            except Exception as e:
-                logger.warning(f"Could not initialize service token manager: {e}")
-                # Fall back to environment variable
-                env_token = os.environ.get('SERVICE_AUTH_TOKEN')
-                if env_token:
-                    self.current_jwt_token = env_token
-                    logger.info("Using service token from environment variable as fallback")
+            self.token_manager = get_service_token_manager("core-recommendations")
 
         # Initialize metadata enhancer (RL-enhanced if available)
         # RL disabled by default until performance is optimized
@@ -376,49 +357,18 @@ class CoreRecommendationsService:
 
         logger.info(f"Initialized Core Recommendations Service on port 5000")
 
-    def _login_to_api(self):
-        """Login to Spring API and get JWT token"""
-        try:
-            username = os.environ.get('SERVICE_USERNAME', 'ml-service')
-            password = os.environ.get('SERVICE_PASSWORD', '')
-
-            if not password:
-                logger.warning("SERVICE_PASSWORD not set, skipping service login")
-                return
-
-            response = requests.post(
-                f"{self.api_base_url}/api/auth/service-login",
-                json={"username": username, "password": password},
-                timeout=10
-            )
-            if response.status_code == 200:
-                data = response.json()
-                self.current_jwt_token = data.get('accessToken')
-                logger.info("Successfully authenticated with Spring API")
-            else:
-                logger.error(f"Service login failed: {response.status_code}")
-        except Exception as e:
-            logger.error(f"Failed to login to API: {e}")
-
     def _update_jwt_token(self, jwt_token: str = None):
         """Update JWT token for all service clients and metadata enhancer"""
-        if jwt_token:
-            self.current_jwt_token = jwt_token
-            self.social_client.update_token(jwt_token)
-            self.comment_client.update_token(jwt_token)
+        # Use provided token, or fall back to current token, or env var
+        token_to_use = jwt_token or self.current_jwt_token or os.environ.get('SERVICE_AUTH_TOKEN')
+
+        if token_to_use:
+            self.current_jwt_token = token_to_use
+            self.social_client.update_token(token_to_use)
+            self.comment_client.update_token(token_to_use)
             # Also update the metadata enhancer
             if hasattr(self.metadata_enhancer, 'set_jwt_token'):
-                self.metadata_enhancer.set_jwt_token(jwt_token)
-        elif get_token_or_fallback and not self.current_jwt_token:
-            # Try to get token from request or fallback
-            fallback_token = get_token_or_fallback()
-            if fallback_token:
-                self.current_jwt_token = fallback_token
-                self.social_client.update_token(fallback_token)
-                self.comment_client.update_token(fallback_token)
-                # Also update the metadata enhancer
-                if hasattr(self.metadata_enhancer, 'set_jwt_token'):
-                    self.metadata_enhancer.set_jwt_token(fallback_token)
+                self.metadata_enhancer.set_jwt_token(token_to_use)
 
     def _load_model(self):
         """Load the TwoTower model"""

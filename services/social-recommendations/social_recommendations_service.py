@@ -116,21 +116,22 @@ class SocialRecommendationsService:
             InteractionType.UNFOLLOW: -1.0
         }
         
-        # Store current JWT token for requests
-        self.current_jwt_token = None
-        
+        # Use SERVICE_AUTH_TOKEN from environment for authentication
+        self.current_jwt_token = os.environ.get('SERVICE_AUTH_TOKEN')
+        if self.current_jwt_token:
+            logger.info("Using SERVICE_AUTH_TOKEN from environment for authentication")
+        else:
+            logger.warning("SERVICE_AUTH_TOKEN not set in environment")
+
         logger.info(f"Initialized Social Recommendations Service on port 8081")
         logger.info(f"Following weight: {self.following_weight}, Community weight: {self.community_weight}")
     
     def _update_jwt_token(self, jwt_token: str = None):
         """Update JWT token for this request"""
-        if jwt_token:
-            self.current_jwt_token = jwt_token
-        elif get_token_or_fallback and not self.current_jwt_token:
-            # Try to get token from request or fallback
-            fallback_token = get_token_or_fallback()
-            if fallback_token:
-                self.current_jwt_token = fallback_token
+        # Use provided token, or fall back to current token, or env var
+        token_to_use = jwt_token or self.current_jwt_token or os.environ.get('SERVICE_AUTH_TOKEN')
+        if token_to_use:
+            self.current_jwt_token = token_to_use
     
     def _get_auth_headers(self) -> Dict[str, str]:
         """Get authentication headers for API calls"""

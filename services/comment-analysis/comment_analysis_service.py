@@ -120,41 +120,19 @@ class CommentAnalysisService:
         logger.info(f"Initialized Comment Analysis Service on port 8082")
         logger.info(f"Using device: {self.device}, Model: {self.model_name}")
         
-        # Store current JWT token for requests
-        self.current_jwt_token = None
-
-        # Initialize service token manager
-        self.token_manager = None
-        if get_service_token_manager:
-            try:
-                self.token_manager = get_service_token_manager("comment-analysis")
-                if self.token_manager.request_service_token(self.api_base_url):
-                    logger.info("Successfully obtained service token from API")
-                    self.current_jwt_token = self.token_manager.get_access_token()
-                else:
-                    logger.warning("Could not obtain service token from API, falling back to environment variable")
-                    env_token = os.environ.get('SERVICE_AUTH_TOKEN')
-                    if env_token:
-                        self.current_jwt_token = env_token
-                        logger.info("Using service token from environment variable")
-                    else:
-                        logger.error("No service token available from API or environment")
-            except Exception as e:
-                logger.warning(f"Could not initialize service token manager: {e}")
-                env_token = os.environ.get('SERVICE_AUTH_TOKEN')
-                if env_token:
-                    self.current_jwt_token = env_token
-                    logger.info("Using service token from environment variable as fallback")
+        # Use SERVICE_AUTH_TOKEN from environment for authentication
+        self.current_jwt_token = os.environ.get('SERVICE_AUTH_TOKEN')
+        if self.current_jwt_token:
+            logger.info("Using SERVICE_AUTH_TOKEN from environment for authentication")
+        else:
+            logger.warning("SERVICE_AUTH_TOKEN not set in environment")
     
     def _update_jwt_token(self, jwt_token: str = None):
         """Update JWT token for this request"""
-        if jwt_token:
-            self.current_jwt_token = jwt_token
-        elif get_token_or_fallback and not self.current_jwt_token:
-            # Try to get token from request or fallback
-            fallback_token = get_token_or_fallback()
-            if fallback_token:
-                self.current_jwt_token = fallback_token
+        # Use provided token, or fall back to current token, or env var
+        token_to_use = jwt_token or self.current_jwt_token or os.environ.get('SERVICE_AUTH_TOKEN')
+        if token_to_use:
+            self.current_jwt_token = token_to_use
     
     def _get_auth_headers(self) -> Dict[str, str]:
         """Get authentication headers for API calls"""
