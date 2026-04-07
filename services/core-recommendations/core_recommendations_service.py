@@ -192,6 +192,7 @@ class CoreRecommendationsService:
         """Initialize the core recommendations service"""
         self.cursor_tracker = {}
         self._cursor_lock = threading.RLock()
+        self.current_jwt_token = None
         load_dotenv()
 
         # Service URLs
