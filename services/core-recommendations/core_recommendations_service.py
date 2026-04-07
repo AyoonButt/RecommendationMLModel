@@ -204,6 +204,9 @@ class CoreRecommendationsService:
         self.social_client = ServiceClient(self.social_service_url)
         self.comment_client = ServiceClient(self.comment_service_url)
 
+        # Authenticate with Spring API
+        self._login_to_api()
+
         # Redis configuration
         redis_host = os.environ.get('REDIS_HOST', 'localhost')
         redis_port = int(os.environ.get('REDIS_PORT', 6379))
@@ -372,7 +375,31 @@ class CoreRecommendationsService:
         logger.info("RecommendationExplainer initialized")
 
         logger.info(f"Initialized Core Recommendations Service on port 5000")
-    
+
+    def _login_to_api(self):
+        """Login to Spring API and get JWT token"""
+        try:
+            username = os.environ.get('SERVICE_USERNAME', 'ml-service')
+            password = os.environ.get('SERVICE_PASSWORD', '')
+
+            if not password:
+                logger.warning("SERVICE_PASSWORD not set, skipping service login")
+                return
+
+            response = requests.post(
+                f"{self.api_base_url}/api/auth/service-login",
+                json={"username": username, "password": password},
+                timeout=10
+            )
+            if response.status_code == 200:
+                data = response.json()
+                self.current_jwt_token = data.get('accessToken')
+                logger.info("Successfully authenticated with Spring API")
+            else:
+                logger.error(f"Service login failed: {response.status_code}")
+        except Exception as e:
+            logger.error(f"Failed to login to API: {e}")
+
     def _update_jwt_token(self, jwt_token: str = None):
         """Update JWT token for all service clients and metadata enhancer"""
         if jwt_token:
