@@ -128,10 +128,13 @@ class SocialRecommendationsService:
     
     def _update_jwt_token(self, jwt_token: str = None):
         """Update JWT token for this request"""
-        # Use provided token, or fall back to current token, or env var
-        token_to_use = jwt_token or self.current_jwt_token or os.environ.get('SERVICE_AUTH_TOKEN')
-        if token_to_use:
-            self.current_jwt_token = token_to_use
+        if jwt_token:
+            self.current_jwt_token = jwt_token
+        elif get_token_or_fallback and not self.current_jwt_token:
+            # Try to get token from request or fallback
+            fallback_token = get_token_or_fallback()
+            if fallback_token:
+                self.current_jwt_token = fallback_token
     
     def _get_auth_headers(self) -> Dict[str, str]:
         """Get authentication headers for API calls"""

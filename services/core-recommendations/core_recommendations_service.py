@@ -205,11 +205,23 @@ class CoreRecommendationsService:
         self.comment_client = ServiceClient(self.comment_service_url)
 
         # Use SERVICE_AUTH_TOKEN from environment for authentication
+        logger.info("=== SERVICE TOKEN INITIALIZATION ===")
         self.current_jwt_token = os.environ.get('SERVICE_AUTH_TOKEN')
         if self.current_jwt_token:
-            logger.info("Using SERVICE_AUTH_TOKEN from environment for authentication")
+            token_preview = self.current_jwt_token[:20] + "..." if len(self.current_jwt_token) > 20 else self.current_jwt_token
+            logger.info(f"SERVICE_AUTH_TOKEN loaded from environment")
+            logger.info(f"Token preview: {token_preview}")
+            logger.info(f"Token length: {len(self.current_jwt_token)} characters")
+            # Basic JWT validation (check if it looks like a JWT)
+            if self.current_jwt_token.count('.') == 2:
+                logger.info("Token format: Valid JWT structure (header.payload.signature)")
+            else:
+                logger.warning(f"Token format: Does NOT look like a JWT (expected 2 dots, found {self.current_jwt_token.count('.')})")
         else:
-            logger.warning("SERVICE_AUTH_TOKEN not set in environment")
+            logger.error("=== TOKEN INITIALIZATION FAILED ===")
+            logger.error("SERVICE_AUTH_TOKEN is NOT set in environment")
+            logger.error("The service will NOT be able to authenticate API requests!")
+            logger.error("Please set SERVICE_AUTH_TOKEN in your .env file or environment")
 
         # Redis configuration
         redis_host = os.environ.get('REDIS_HOST', 'localhost')
@@ -263,10 +275,53 @@ class CoreRecommendationsService:
         self.pool_cache = CandidatePoolCache(self.redis_client, pool_ttl=pool_ttl)
         logger.info(f"Candidate pool cache initialized (enabled={self.pool_enabled}, ttl={pool_ttl}s, cap=200)")
 
-        # Token manager for compatibility (now just reads from env var)
+        # Initialize service token manager
+        logger.info("=== SERVICE TOKEN MANAGER INITIALIZATION ===")
         self.token_manager = None
+        token_before_manager = self.current_jwt_token
+        logger.info(f"Token state before manager init: {'SET' if token_before_manager else 'NOT SET'}")
+
         if get_service_token_manager:
-            self.token_manager = get_service_token_manager("core-recommendations")
+            logger.info("ServiceTokenManager is available, attempting API token request...")
+            try:
+                self.token_manager = get_service_token_manager("core-recommendations")
+                # Try to get token from API
+                if self.token_manager.request_service_token(self.api_base_url):
+                    logger.info("Successfully obtained service token from API")
+                    # Update current JWT token with the new one from API
+                    self.current_jwt_token = self.token_manager.get_access_token()
+                    logger.info(f"Updated current_jwt_token with API token (length: {len(self.current_jwt_token) if self.current_jwt_token else 0})")
+                else:
+                    logger.warning("Could not obtain service token from API, falling back to environment variable")
+                    # Fall back to environment variable
+                    env_token = os.environ.get('SERVICE_AUTH_TOKEN')
+                    if env_token:
+                        self.current_jwt_token = env_token
+                        logger.info(f"Using service token from environment variable (length: {len(env_token)})")
+                    else:
+                        logger.error("=== CRITICAL: NO SERVICE TOKEN AVAILABLE ===")
+                        logger.error("API token request failed AND SERVICE_AUTH_TOKEN not set in environment")
+                logger.info("Service token manager initialized")
+            except Exception as e:
+                logger.warning(f"Could not initialize service token manager: {e}")
+                # Fall back to environment variable
+                env_token = os.environ.get('SERVICE_AUTH_TOKEN')
+                if env_token:
+                    self.current_jwt_token = env_token
+                    logger.info(f"Using service token from environment variable as fallback (length: {len(env_token)})")
+                else:
+                    logger.error("=== CRITICAL: NO SERVICE TOKEN AVAILABLE ===")
+                    logger.error(f"Token manager init failed: {e}")
+                    logger.error("SERVICE_AUTH_TOKEN also not set in environment")
+        else:
+            logger.info("ServiceTokenManager not available, relying on environment token only")
+
+        # Final token status check
+        logger.info("=== FINAL TOKEN STATUS ===")
+        if self.current_jwt_token:
+            logger.info(f"Service token is SET (length: {len(self.current_jwt_token)} chars)")
+        else:
+            logger.error("Service token is NOT SET - API calls requiring auth will FAIL!")
 
         # Initialize metadata enhancer (RL-enhanced if available)
         # RL disabled by default until performance is optimized
@@ -355,20 +410,64 @@ class CoreRecommendationsService:
         )
         logger.info("RecommendationExplainer initialized")
 
+        # Final startup summary
+        logger.info("=" * 60)
+        logger.info("=== CORE RECOMMENDATIONS SERVICE STARTUP SUMMARY ===")
+        logger.info("=" * 60)
+        logger.info(f"API Base URL: {self.api_base_url}")
+        logger.info(f"Auth Token Status: {'CONFIGURED' if self.current_jwt_token else 'NOT CONFIGURED - API AUTH WILL FAIL!'}")
+        if self.current_jwt_token:
+            logger.info(f"  Token Length: {len(self.current_jwt_token)} chars")
+            logger.info(f"  Token Format: {'Valid JWT' if self.current_jwt_token.count('.') == 2 else 'INVALID (not a JWT)'}")
+        logger.info(f"RL Enabled: {self.rl_enabled}")
+        logger.info(f"Pool Enabled: {self.pool_enabled}")
+        logger.info("=" * 60)
+
         logger.info(f"Initialized Core Recommendations Service on port 5000")
+
+    def _login_to_api(self):
+        """Login to Spring API and get JWT token"""
+        try:
+            username = os.environ.get('SERVICE_USERNAME', 'ml-service')
+            password = os.environ.get('SERVICE_PASSWORD', '')
+
+            if not password:
+                logger.warning("SERVICE_PASSWORD not set, skipping service login")
+                return
+
+            response = requests.post(
+                f"{self.api_base_url}/api/auth/service-login",
+                json={"username": username, "password": password},
+                timeout=10
+            )
+            if response.status_code == 200:
+                data = response.json()
+                self.current_jwt_token = data.get('accessToken')
+                logger.info("Successfully authenticated with Spring API")
+            else:
+                logger.error(f"Service login failed: {response.status_code}")
+        except Exception as e:
+            logger.error(f"Failed to login to API: {e}")
 
     def _update_jwt_token(self, jwt_token: str = None):
         """Update JWT token for all service clients and metadata enhancer"""
-        # Use provided token, or fall back to current token, or env var
-        token_to_use = jwt_token or self.current_jwt_token or os.environ.get('SERVICE_AUTH_TOKEN')
-
-        if token_to_use:
-            self.current_jwt_token = token_to_use
-            self.social_client.update_token(token_to_use)
-            self.comment_client.update_token(token_to_use)
+        if jwt_token:
+            self.current_jwt_token = jwt_token
+            self.social_client.update_token(jwt_token)
+            self.comment_client.update_token(jwt_token)
             # Also update the metadata enhancer
             if hasattr(self.metadata_enhancer, 'set_jwt_token'):
-                self.metadata_enhancer.set_jwt_token(token_to_use)
+                self.metadata_enhancer.set_jwt_token(jwt_token)
+        elif get_token_or_fallback and not self.current_jwt_token:
+            # Try to get token from request or fallback
+            fallback_token = get_token_or_fallback()
+            if fallback_token:
+                self.current_jwt_token = fallback_token
+                self.social_client.update_token(fallback_token)
+                self.comment_client.update_token(fallback_token)
+                # Also update the metadata enhancer
+                if hasattr(self.metadata_enhancer, 'set_jwt_token'):
+                    self.metadata_enhancer.set_jwt_token(fallback_token)
 
     def _load_model(self):
         """Load the TwoTower model"""
@@ -791,11 +890,26 @@ class CoreRecommendationsService:
 
             headers = {}
             # Use current JWT token or fallback to environment token
-            auth_token = self.current_jwt_token or os.environ.get('SERVICE_AUTH_TOKEN', '')
+            logger.info(f"=== TOKEN STATUS FOR CANDIDATE REQUEST ===")
+            logger.info(f"self.current_jwt_token: {'SET (' + str(len(self.current_jwt_token)) + ' chars)' if self.current_jwt_token else 'NOT SET (None)'}")
+            env_token = os.environ.get('SERVICE_AUTH_TOKEN', '')
+            logger.info(f"SERVICE_AUTH_TOKEN env var: {'SET (' + str(len(env_token)) + ' chars)' if env_token else 'NOT SET (empty)'}")
+
+            auth_token = self.current_jwt_token or env_token
             if auth_token:
                 headers['Authorization'] = f'Bearer {auth_token}'
                 headers['X-Service-Role'] = 'SERVICE'
-            
+                token_preview = auth_token[:30] + "..." if len(auth_token) > 30 else auth_token
+                logger.info(f"Auth token applied: {token_preview}")
+                logger.info(f"Auth token length: {len(auth_token)} characters")
+                # Check if it looks like a valid JWT
+                if auth_token.count('.') != 2:
+                    logger.warning(f"Token does NOT appear to be a valid JWT (expected 2 dots, found {auth_token.count('.')})")
+            else:
+                logger.error("=== NO AUTH TOKEN AVAILABLE FOR CANDIDATE REQUEST ===")
+                logger.error("Both self.current_jwt_token and SERVICE_AUTH_TOKEN are empty!")
+                logger.error("This request will likely fail with 401/403/500 error")
+
             logger.info(f"=== CANDIDATE API REQUEST ===")
             logger.info(f"URL: {url}")
             logger.info(f"Params: {params}")
@@ -893,17 +1007,35 @@ class CoreRecommendationsService:
                     logger.warning("Could not read error response body")
 
                 if response.status_code == 401:
-                    logger.error(f"Authentication failed (401) for candidate fetch - token may be expired or invalid")
-                    logger.error(f"Token present: {bool(auth_token)}, Headers sent: Authorization={'present' if 'Authorization' in headers else 'missing'}, X-Service-Role={'present' if 'X-Service-Role' in headers else 'missing'}")
+                    logger.error(f"=== AUTHENTICATION FAILED (401) ===")
+                    logger.error(f"Token may be expired, invalid, or malformed")
+                    logger.error(f"Token present: {bool(auth_token)}")
+                    logger.error(f"Token length: {len(auth_token) if auth_token else 0} chars")
+                    logger.error(f"Headers sent: Authorization={'present' if 'Authorization' in headers else 'MISSING'}, X-Service-Role={'present' if 'X-Service-Role' in headers else 'MISSING'}")
+                    if auth_token:
+                        logger.error(f"Token preview: {auth_token[:50]}...")
+                        logger.error(f"Token looks like JWT: {auth_token.count('.') == 2}")
+                    logger.error("ACTION: Check if SERVICE_AUTH_TOKEN is a valid, non-expired JWT")
                 elif response.status_code == 403:
-                    logger.error(f"Authorization failed (403) for candidate fetch - user {user_id} may lack permissions")
-                    logger.error(f"Token present: {bool(auth_token)}, Service role header: {headers.get('X-Service-Role', 'missing')}")
-                    logger.error(f"This may indicate: 1) Token lacks SERVICE role, 2) Endpoint requires different permissions, 3) Security filter blocking request")
+                    logger.error(f"=== AUTHORIZATION FAILED (403) ===")
+                    logger.error(f"Token present: {bool(auth_token)}, Service role header: {headers.get('X-Service-Role', 'MISSING')}")
+                    logger.error(f"Token is valid but lacks required permissions")
+                    logger.error(f"This may indicate: 1) Token lacks SERVICE role, 2) User {user_id} not accessible, 3) Endpoint requires admin permissions")
+                    logger.error("ACTION: Ensure token has SERVICE role and appropriate permissions")
                 elif response.status_code == 404:
                     logger.warning(f"Candidate endpoint not found (404) - check API base URL: {self.api_base_url}")
                 elif response.status_code >= 500:
-                    logger.error(f"Server error ({response.status_code}) accessing candidates for user {user_id}")
-                    logger.error(f"This is a backend issue - check Spring service logs")
+                    logger.error(f"=== SERVER ERROR ({response.status_code}) ===")
+                    logger.error(f"Backend service error accessing candidates for user {user_id}")
+                    logger.error(f"Token was {'present' if auth_token else 'NOT present (this may be the cause!)'}")
+                    if not auth_token:
+                        logger.error("=== LIKELY CAUSE: NO AUTH TOKEN ===")
+                        logger.error("The 500 error may be caused by missing authentication")
+                        logger.error("Spring API may throw internal error when trying to process unauthenticated request")
+                        logger.error("ACTION: Set SERVICE_AUTH_TOKEN environment variable")
+                    else:
+                        logger.error(f"Token was present (length: {len(auth_token)}), so this is likely a backend issue")
+                        logger.error("ACTION: Check Spring service logs for the actual error")
 
                 return {"vectors": {}, "nextCursor": None, "hasMore": False, "distribution": {}}
 

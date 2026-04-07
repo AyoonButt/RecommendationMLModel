@@ -42,6 +42,7 @@ services:
       - GUNICORN_TIMEOUT=120
       - GUNICORN_LOG_LEVEL=info
       - SERVICE_VERSION=1.0.0
+      - SERVICE_AUTH_TOKEN=${SERVICE_AUTH_TOKEN}
     volumes:
       - ../../model_checkpoints:/app/model_checkpoints
       - ../../logs:/app/logs
