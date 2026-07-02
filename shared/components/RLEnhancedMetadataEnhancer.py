@@ -21,8 +21,9 @@ import os
 # Add the rl-agent service to the path
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../services/rl-agent'))
 
-from MetadataEnhancer import MetadataEnhancer, create_diversity_enforcer
+from MetadataEnhancer import MetadataEnhancer, create_diversity_enforcer, extract_person_ids
 from RLIntegration import RLIntegrationManager, create_rl_integration_manager
+from GenreTextClassifier import classify_overview_genres
 
 logger = logging.getLogger("rl-enhanced-metadata-enhancer")
 
@@ -166,6 +167,9 @@ class RLEnhancedMetadataEnhancer(MetadataEnhancer):
         """Process user interaction feedback for RL learning."""
         user_id_int = int(user_id)
 
+        if interaction_type == 'not_interested':
+            self._record_avoided_signals(user_id, post_id)
+
         # Get stored RL context
         rl_context = self._get_stored_rl_context(user_id_int)
 
@@ -185,6 +189,35 @@ class RLEnhancedMetadataEnhancer(MetadataEnhancer):
 
         logger.debug(f"Processed RL feedback: user {user_id}, post {post_id}, "
                     f"interaction {interaction_type}")
+
+    def _record_avoided_signals(self, user_id: str, post_id: int) -> None:
+        """
+        On a not_interested interaction, record avoidance signals for this user
+        (consumed as graduated soft penalties in enhance_scores):
+        - genre: classified from the post's overview text
+        - person: cast/crew IDs, exact matching, no text mining
+        """
+        try:
+            post_metadata = self._get_cached_metadata(f"post:{post_id}")
+            if not post_metadata:
+                return
+
+            overview = post_metadata.get('overview', '')
+            if overview:
+                classified_genres = classify_overview_genres(overview)
+                if classified_genres:
+                    self.avoided_signal_tracker.record(user_id, 'genre', list(classified_genres))
+                    logger.debug(f"Recorded not_interested genres for user {user_id}, "
+                               f"post {post_id}: {classified_genres}")
+
+            person_ids = extract_person_ids(post_metadata)
+            if person_ids:
+                self.avoided_signal_tracker.record(user_id, 'person', person_ids)
+                logger.debug(f"Recorded not_interested cast/crew for user {user_id}, "
+                           f"post {post_id}: {person_ids}")
+
+        except Exception as e:
+            logger.warning(f"Error recording avoided signals for user {user_id}, post {post_id}: {e}")
 
     def _prepare_candidates_for_rl(self, post_ids: List[int], enhanced_scores: np.ndarray,
                                    candidates: List[Dict], content_type: str) -> List[Dict]:

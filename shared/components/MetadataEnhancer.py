@@ -28,6 +28,43 @@ _meta_executor = ThreadPoolExecutor(max_workers=4)
 
 from EligibilityFilter import EligibilityFilter, create_eligibility_filter
 from DiversityEnforcer import DiversityEnforcer, create_diversity_enforcer
+from GenreTextClassifier import classify_overview_genres
+from AvoidedSignalTracker import AvoidedSignalTracker
+
+
+def extract_person_ids(post_metadata: Dict, max_cast: int = 5) -> List[int]:
+    """
+    Extract cast/crew person IDs from post metadata for exact-ID avoidance matching.
+
+    Cast is limited to the top-billed entries (list order, as returned by the API)
+    rather than the full cast list, so the signal isn't diluted by minor/background
+    roles. All listed crew departments (director, etc.) are included in full since
+    crew lists are typically short and each entry is meaningfully influential.
+
+    Args:
+        post_metadata: Post metadata (cast, crew - TMDB data)
+        max_cast: Number of top-billed cast entries to include
+
+    Returns:
+        List of person IDs (cast + crew), possibly with duplicates if someone
+        appears in both (e.g. actor-director) - callers treat this as a bag.
+    """
+    person_ids = []
+
+    cast = post_metadata.get('cast', []) or []
+    for entry in cast[:max_cast]:
+        person_id = entry.get('id')
+        if person_id is not None:
+            person_ids.append(int(person_id))
+
+    crew = post_metadata.get('crew', {}) or {}
+    for department_entries in crew.values():
+        for entry in (department_entries or []):
+            person_id = entry.get('id')
+            if person_id is not None:
+                person_ids.append(int(person_id))
+
+    return person_ids
 
 logger = logging.getLogger("metadata-enhancer")
 
@@ -92,11 +129,25 @@ class MetadataEnhancer:
         self.behavioral_genres_enabled = os.environ.get('BEHAVIORAL_GENRES_ENABLED', 'true').lower() == 'true'
         self.behavioral_genres_cache_ttl = int(os.environ.get('BEHAVIORAL_GENRES_CACHE_TTL', '3600'))
 
+        # Avoid Genres Configuration (declared user preference, service-gated endpoint)
+        self.avoid_genres_enabled = os.environ.get('AVOID_GENRES_ENABLED', 'true').lower() == 'true'
+
+        # Inferred Avoided Signals (behaviorally derived from not_interested interactions,
+        # covers multiple categories - genre, cast/crew, ... - see AvoidedSignalTracker)
+        self.avoided_signal_tracker = AvoidedSignalTracker(redis_client)
+        self.avoided_signal_penalty_enabled = os.environ.get('AVOIDED_SIGNAL_PENALTY_ENABLED', 'true').lower() == 'true'
+        self.avoided_signal_penalty_per_count = float(os.environ.get('AVOIDED_SIGNAL_PENALTY_PER_COUNT', '0.15'))
+        self.avoided_signal_min_penalty_factor = float(os.environ.get('AVOIDED_SIGNAL_MIN_PENALTY_FACTOR', '0.2'))
+
         logger.info(f"TMDB ToS Compliant MetadataEnhancer initialized")
         logger.info(f"Velocity boost: enabled={self.velocity_boost_enabled}, "
                    f"threshold={self.velocity_trending_threshold}, "
                    f"boost={self.velocity_trending_boost}")
         logger.info(f"Behavioral genres: enabled={self.behavioral_genres_enabled}")
+        logger.info(f"Avoid genres: enabled={self.avoid_genres_enabled}")
+        logger.info(f"Avoided signal penalty: enabled={self.avoided_signal_penalty_enabled}, "
+                   f"per_count={self.avoided_signal_penalty_per_count}, "
+                   f"min_factor={self.avoided_signal_min_penalty_factor}")
 
     def set_jwt_token(self, token: str):
         """Update the JWT token used for API authentication."""
@@ -120,6 +171,8 @@ class MetadataEnhancer:
         Enhancement pipeline:
         1. Eligibility filtering (TMDB data - boolean pass/fail)
         2. Behavioral genre soft filter (penalize non-matching genres)
+        2b. Avoided-genre soft penalty (graduated, based on not_interested history)
+        2c. Avoided-person soft penalty (graduated, cast/crew, based on not_interested history)
         3. Behavioral engagement boost (app data ONLY)
         4. Engagement velocity boost (trending content)
 
@@ -152,6 +205,15 @@ class MetadataEnhancer:
                 future_velocity.result()
             user_metadata = future_user_meta.result()
 
+            # Fetched fresh every call (not through the hourly user-metadata cache) so a
+            # not_interested interaction affects the very next recommendation, not the
+            # next cache refresh up to an hour later.
+            avoided_genre_counts = {}
+            avoided_person_counts = {}
+            if self.avoided_signal_penalty_enabled:
+                avoided_genre_counts = self.avoided_signal_tracker.get_counts(user_id, 'genre')
+                avoided_person_counts = self.avoided_signal_tracker.get_counts(user_id, 'person')
+
             for i, post_id in enumerate(post_ids):
                 post_metadata = self._get_cached_metadata(f"post:{post_id}")
 
@@ -166,6 +228,18 @@ class MetadataEnhancer:
                         post_metadata, user_metadata
                     )
                     enhanced_scores[i] *= genre_penalty
+
+                # Step 2b: Avoided-genre soft penalty (behaviorally inferred, graduated)
+                if post_metadata and avoided_genre_counts:
+                    enhanced_scores[i] *= self._calculate_avoided_genre_penalty(
+                        post_metadata, avoided_genre_counts
+                    )
+
+                # Step 2c: Avoided-person soft penalty (cast/crew, behaviorally inferred, graduated)
+                if post_metadata and avoided_person_counts:
+                    enhanced_scores[i] *= self._calculate_avoided_person_penalty(
+                        post_metadata, avoided_person_counts
+                    )
 
                 # Step 3: Behavioral engagement boost ONLY (app data, not TMDB)
                 if post_metadata:
@@ -243,6 +317,88 @@ class MetadataEnhancer:
         except Exception as e:
             logger.warning(f"Error applying behavioral boost: {e}")
             return score
+
+    def _graduated_penalty(self, matched_counts: List[int]) -> float:
+        """
+        Shared graduated-penalty formula for behaviorally inferred avoidance signals.
+
+        Scales with repetition rather than rejecting outright on a single
+        occurrence - one not_interested click is noisy signal, a repeated
+        pattern is not. Used by both the avoided-genre and avoided-person checks.
+
+        Args:
+            matched_counts: not_interested counts for each signal value the post matched
+
+        Returns:
+            Penalty factor (1.0 = no penalty, floored at avoided_signal_min_penalty_factor)
+        """
+        if not matched_counts:
+            return 1.0
+        worst_count = max(matched_counts)
+        penalty = 1.0 - (self.avoided_signal_penalty_per_count * worst_count)
+        return max(self.avoided_signal_min_penalty_factor, penalty)
+
+    def _calculate_avoided_genre_penalty(self, post_metadata: Dict,
+                                         avoided_genre_counts: Dict[str, int]) -> float:
+        """
+        Calculate a graduated soft penalty for posts whose overview classifies into
+        a genre the user has repeatedly marked not_interested on.
+
+        Unlike the hard avoidGenres eligibility filter (declared preference), this
+        is inferred from behavior - see _graduated_penalty.
+
+        Args:
+            post_metadata: Post metadata (overview - TMDB data)
+            avoided_genre_counts: User's genre -> not_interested count map
+
+        Returns:
+            Penalty factor (1.0 = no penalty, floored at avoided_signal_min_penalty_factor)
+        """
+        try:
+            overview = post_metadata.get('overview', '')
+            if not overview:
+                return 1.0
+
+            classified_genres = classify_overview_genres(overview)
+            matched_counts = [
+                avoided_genre_counts[g] for g in classified_genres if g in avoided_genre_counts
+            ]
+            return self._graduated_penalty(matched_counts)
+
+        except Exception as e:
+            logger.warning(f"Error calculating avoided-genre penalty: {e}")
+            return 1.0
+
+    def _calculate_avoided_person_penalty(self, post_metadata: Dict,
+                                          avoided_person_counts: Dict[str, int]) -> float:
+        """
+        Calculate a graduated soft penalty for posts whose cast/crew includes a
+        person the user has repeatedly marked not_interested on.
+
+        Exact person-ID matching (cast + crew, see extract_person_ids) - no text
+        mining involved, so no dependency on overview text being present.
+
+        Args:
+            post_metadata: Post metadata (cast, crew - TMDB data)
+            avoided_person_counts: User's person_id (str) -> not_interested count map
+
+        Returns:
+            Penalty factor (1.0 = no penalty, floored at avoided_signal_min_penalty_factor)
+        """
+        try:
+            person_ids = extract_person_ids(post_metadata)
+            if not person_ids:
+                return 1.0
+
+            matched_counts = [
+                avoided_person_counts[str(pid)] for pid in person_ids
+                if str(pid) in avoided_person_counts
+            ]
+            return self._graduated_penalty(matched_counts)
+
+        except Exception as e:
+            logger.warning(f"Error calculating avoided-person penalty: {e}")
+            return 1.0
 
     def _calculate_velocity_boost(self, velocity_data: Dict) -> float:
         """
@@ -512,16 +668,17 @@ class MetadataEnhancer:
             if not post_ids:
                 return {}
 
-            url = f"{self.api_base_url}/api/recommendations/posts/metadata/batch"
+            url = f"{self.api_base_url}/api/internal/posts/metadata/batch"
 
             headers = {'Content-Type': 'application/json'}
             headers.update(self._get_auth_headers())
             response = requests.post(url, json=post_ids, headers=headers, timeout=10)
 
             if response.status_code == 200:
-                # Response is Map<Int, Map<String, Any?>?> - convert string keys to int
+                # Response is Map<Int, {"more_info": Map<String, Any?>}?> - convert
+                # string keys to int and unwrap/normalize the more_info payload
                 raw_response = response.json()
-                return {int(k): v for k, v in raw_response.items()}
+                return {int(k): self._normalize_post_metadata(v) for k, v in raw_response.items()}
             else:
                 logger.warning(f"Batch API returned status {response.status_code}")
                 return None
@@ -529,6 +686,27 @@ class MetadataEnhancer:
         except Exception as e:
             logger.warning(f"Error fetching batch metadata from API: {e}")
             return None
+
+    def _normalize_post_metadata(self, raw: Optional[Dict]) -> Optional[Dict]:
+        """
+        Normalize a raw post-metadata API response into the flat, camelCase
+        shape every consumer (EligibilityFilter, DiversityEnforcer,
+        RecommendationExplainer, behavioral boost) expects.
+
+        The API wraps the actual fields under a "more_info" key, and Postgres
+        folds some unquoted column aliases to lowercase (voteaverage, releasedate).
+        """
+        if raw is None:
+            return None
+
+        metadata = raw.get('more_info', raw) if isinstance(raw, dict) else raw
+
+        if 'voteaverage' in metadata and 'voteAverage' not in metadata:
+            metadata['voteAverage'] = metadata['voteaverage']
+        if 'releasedate' in metadata and 'releaseDate' not in metadata:
+            metadata['releaseDate'] = metadata['releasedate']
+
+        return metadata
 
     def _get_cached_metadata(self, key: str) -> Optional[Dict]:
         """Get metadata from cache or API with caching."""
@@ -591,7 +769,7 @@ class MetadataEnhancer:
             entity_type, entity_id = parts
 
             if entity_type == 'user':
-                url = f"{self.api_base_url}/api/recommendations/users/{entity_id}/metadata"
+                url = f"{self.api_base_url}/api/internal/users/{entity_id}/metadata"
                 headers = self._get_auth_headers()
                 response = requests.get(url, headers=headers, timeout=5)
 
@@ -601,6 +779,10 @@ class MetadataEnhancer:
                         behavioral_genres = self._fetch_behavioral_genres(entity_id)
                         if behavioral_genres:
                             metadata['behavioralGenres'] = behavioral_genres
+                    if self.avoid_genres_enabled:
+                        avoid_genres = self._fetch_avoid_genres(entity_id)
+                        if avoid_genres:
+                            metadata['avoidGenres'] = avoid_genres
                     return metadata
                 else:
                     logger.warning(f"API returned status {response.status_code} for {key}")
@@ -608,12 +790,12 @@ class MetadataEnhancer:
 
             elif entity_type == 'post':
                 # Individual post fetch as fallback (batch should be used normally)
-                url = f"{self.api_base_url}/api/recommendations/posts/{entity_id}/metadata"
+                url = f"{self.api_base_url}/api/internal/posts/{entity_id}/metadata"
                 headers = self._get_auth_headers()
                 response = requests.get(url, headers=headers, timeout=5)
 
                 if response.status_code == 200:
-                    return response.json()
+                    return self._normalize_post_metadata(response.json())
                 else:
                     logger.warning(f"API returned status {response.status_code} for {key}")
                     return None
@@ -650,6 +832,34 @@ class MetadataEnhancer:
 
         except Exception as e:
             logger.debug(f"Error fetching behavioral genres for user {user_id}: {e}")
+            return []
+
+    def _fetch_avoid_genres(self, user_id: str) -> List[str]:
+        """
+        Fetch a user's declared avoid-genres from the service-gated Spring API endpoint.
+
+        Args:
+            user_id: User ID
+
+        Returns:
+            List of genre names the user wants excluded from recommendations
+        """
+        try:
+            url = f"{self.api_base_url}/api/internal/users/{user_id}/avoidGenres"
+            headers = self._get_auth_headers()
+            response = requests.get(url, headers=headers, timeout=5)
+
+            if response.status_code == 200:
+                data = response.json()
+                avoid_genres = [g.get('genre_name') for g in data if g.get('genre_name')]
+                logger.debug(f"Fetched {len(avoid_genres)} avoid-genres for user {user_id}")
+                return avoid_genres
+            else:
+                logger.debug(f"Avoid-genres API returned {response.status_code} for user {user_id}")
+                return []
+
+        except Exception as e:
+            logger.debug(f"Error fetching avoid-genres for user {user_id}: {e}")
             return []
 
     def _cleanup_memory_cache(self, current_time: float):

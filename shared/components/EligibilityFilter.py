@@ -14,6 +14,8 @@ Features:
 import logging
 from typing import Dict, List, Optional, Set
 
+from GenreTextClassifier import classify_overview_genres
+
 logger = logging.getLogger("eligibility-filter")
 
 
@@ -55,6 +57,7 @@ class EligibilityFilter:
             'filtered_language': 0,
             'filtered_quality': 0,
             'filtered_providers': 0,
+            'filtered_avoid_genres': 0,
             'passed': 0,
             'behavioral_genre_checks': 0,
             'behavioral_genre_matches': 0
@@ -96,6 +99,12 @@ class EligibilityFilter:
         # Provider availability filter
         if not self._check_providers(post_metadata, user_metadata):
             self.stats['filtered_providers'] += 1
+            return False
+
+        # Avoid-genres filter (declared preference, matched via structured genres
+        # and via overview text classification for genres missing from genreWeights)
+        if not self._check_avoid_genres(post_metadata, user_metadata):
+            self.stats['filtered_avoid_genres'] += 1
             return False
 
         self.stats['passed'] += 1
@@ -252,6 +261,31 @@ class EligibilityFilter:
         # Check for overlap between user subscriptions and content availability
         return bool(user_providers & content_providers)
 
+    def _check_avoid_genres(self, post_meta: Dict, user_meta: Dict) -> bool:
+        """
+        Check if post's overview text implies one of the user's declared avoid-genres.
+
+        Structured genreWeights-based avoid-genre filtering already happens
+        upstream (candidate generation) - this check exists specifically to catch
+        posts TMDB's structured genre tags miss but the overview text makes clear
+        (e.g. a film not tagged "horror" whose synopsis is unambiguously horror).
+
+        Args:
+            post_meta: Post metadata (overview - TMDB data)
+            user_meta: User metadata (avoidGenres - user's declared preference)
+
+        Returns:
+            Boolean: True if post is acceptable (overview doesn't imply an avoided genre)
+        """
+        avoid_genres = user_meta.get('avoidGenres', [])
+        overview = post_meta.get('overview', '')
+        if not avoid_genres or not overview:
+            return True
+
+        avoid_genres_lower = {g.lower() for g in avoid_genres}
+        classified_genres = classify_overview_genres(overview)
+        return not any(g.lower() in avoid_genres_lower for g in classified_genres)
+
     def get_filter_reasons(self, post_metadata: Dict, user_metadata: Dict) -> List[str]:
         """
         Get detailed reasons why a post was filtered (for debugging/logging).
@@ -281,6 +315,13 @@ class EligibilityFilter:
             content_providers = post_metadata.get('availableProviders', [])
             reasons.append(f"No provider match: user={user_providers}, content={content_providers}")
 
+        if not self._check_avoid_genres(post_metadata, user_metadata):
+            avoid_genres = user_metadata.get('avoidGenres', [])
+            overview = post_metadata.get('overview', '')
+            classified = classify_overview_genres(overview)
+            reasons.append(f"Avoid-genre match via overview: user_avoids={avoid_genres}, "
+                          f"overview_classified_as={sorted(classified)}")
+
         return reasons
 
     def get_stats(self) -> Dict[str, any]:
@@ -295,6 +336,7 @@ class EligibilityFilter:
             'language_filter_rate': self.stats['filtered_language'] / total,
             'quality_filter_rate': self.stats['filtered_quality'] / total,
             'provider_filter_rate': self.stats['filtered_providers'] / total,
+            'avoid_genre_filter_rate': self.stats['filtered_avoid_genres'] / total,
             'behavioral_genre_match_rate': (
                 self.stats['behavioral_genre_matches'] / self.stats['behavioral_genre_checks']
                 if self.stats['behavioral_genre_checks'] > 0 else 0.0
@@ -308,6 +350,7 @@ class EligibilityFilter:
             'filtered_language': 0,
             'filtered_quality': 0,
             'filtered_providers': 0,
+            'filtered_avoid_genres': 0,
             'passed': 0,
             'behavioral_genre_checks': 0,
             'behavioral_genre_matches': 0

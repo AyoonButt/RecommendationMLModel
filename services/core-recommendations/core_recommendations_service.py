@@ -600,43 +600,35 @@ class CoreRecommendationsService:
                 except Exception as pool_err:
                     logger.warning(f"Pool pull failed (non-fatal): {pool_err}")
 
-            # Fetch fresh candidates if pool doesn't have enough
-            if len(pool_vectors) >= fetch_limit:
-                logger.info(f"Serving from pool cache ({len(pool_vectors)} candidates, skip API call)")
-                candidate_data = {
-                    "vectors": pool_vectors,
-                    "nextCursor": cursor,
-                    "nextHighQualityCursor": high_quality_cursor,
-                    "hasMore": True,
-                    "hasMoreHighQuality": False,
-                    "distribution": {},
-                    "candidates": []
-                }
-            else:
-                logger.info(f"Fetching {fetch_limit} candidates from API (pool has {len(pool_vectors)})...")
-                candidate_data = self._fetch_candidate_vectors(
-                    user_id=user_id,
-                    limit=fetch_limit,
-                    content_type="POSTS",
-                    cursor=cursor,
-                    high_quality_cursor=high_quality_cursor
-                )
-                # Filter fresh candidates against shown set before merging
-                fresh_vectors = self.pool_cache.filter_shown(user_id, "posts", candidate_data["vectors"])
-                filtered_count = len(candidate_data["vectors"]) - len(fresh_vectors)
-                if filtered_count:
-                    logger.info(f"Filtered {filtered_count} already-shown posts from fresh API fetch")
-                # Fallback: if filtering exhausted all candidates, allow re-recommendation
-                if not fresh_vectors and candidate_data["vectors"]:
-                    logger.warning(f"All {filtered_count} fresh candidates already shown for user {user_id} — falling back to unfiltered set")
-                    fresh_vectors = candidate_data["vectors"]
-                candidate_data["vectors"] = fresh_vectors
-                # Merge pool candidates into fresh fetch (fresh wins on collision)
-                if pool_vectors:
-                    merged = dict(pool_vectors)
-                    merged.update(fresh_vectors)
-                    candidate_data["vectors"] = merged
-                    logger.info(f"Merged {len(pool_vectors)} pool + {len(fresh_vectors)} fresh = {len(merged)} total candidates")
+            # Always fetch fresh candidates from the API so interaction data (e.g. new
+            # likes) is re-validated on every request — the pool alone can go stale for
+            # up to its TTL and must never be served without this check.
+            logger.info(f"Fetching {fetch_limit} candidates from API (pool has {len(pool_vectors)})...")
+            candidate_data = self._fetch_candidate_vectors(
+                user_id=user_id,
+                limit=fetch_limit,
+                content_type="POSTS",
+                cursor=cursor,
+                high_quality_cursor=high_quality_cursor
+            )
+            # Filter fresh candidates against shown set before merging
+            fresh_vectors = self.pool_cache.filter_shown(user_id, "posts", candidate_data["vectors"])
+            filtered_count = len(candidate_data["vectors"]) - len(fresh_vectors)
+            if filtered_count:
+                logger.info(f"Filtered {filtered_count} already-shown posts from fresh API fetch")
+            # Fallback: if filtering exhausted all candidates, re-admit a bounded number
+            # of already-shown items (capped at what this response actually needs)
+            # rather than starving the user of content or dumping the full unfiltered set
+            if not fresh_vectors and candidate_data["vectors"]:
+                fresh_vectors = dict(list(candidate_data["vectors"].items())[:limit])
+                logger.warning(f"All {filtered_count} fresh candidates already shown for user {user_id} — falling back to {len(fresh_vectors)} unfiltered candidates (capped at {limit})")
+            candidate_data["vectors"] = fresh_vectors
+            # Merge pool candidates into fresh fetch (fresh wins on collision)
+            if pool_vectors:
+                merged = dict(pool_vectors)
+                merged.update(fresh_vectors)
+                candidate_data["vectors"] = merged
+                logger.info(f"Merged {len(pool_vectors)} pool + {len(fresh_vectors)} fresh = {len(merged)} total candidates")
 
             candidate_count = len(candidate_data.get("vectors", {}))
             if not candidate_data["vectors"]:
@@ -754,43 +746,35 @@ class CoreRecommendationsService:
                 except Exception as pool_err:
                     logger.warning(f"Pool pull failed (non-fatal): {pool_err}")
 
-            # Fetch fresh candidates if pool doesn't have enough
-            if len(pool_vectors) >= fetch_limit:
-                logger.info(f"Serving from pool cache ({len(pool_vectors)} trailer candidates, skip API call)")
-                candidate_data = {
-                    "vectors": pool_vectors,
-                    "nextCursor": cursor,
-                    "nextHighQualityCursor": high_quality_cursor,
-                    "hasMore": True,
-                    "hasMoreHighQuality": False,
-                    "distribution": {},
-                    "candidates": []
-                }
-            else:
-                logger.info(f"Fetching {fetch_limit} trailer candidates from API (pool has {len(pool_vectors)})...")
-                candidate_data = self._fetch_candidate_vectors(
-                    user_id=user_id,
-                    limit=fetch_limit,
-                    content_type="TRAILERS",
-                    cursor=cursor,
-                    high_quality_cursor=high_quality_cursor
-                )
-                # Filter fresh candidates against shown set before merging
-                fresh_vectors = self.pool_cache.filter_shown(user_id, "trailers", candidate_data["vectors"])
-                filtered_count = len(candidate_data["vectors"]) - len(fresh_vectors)
-                if filtered_count:
-                    logger.info(f"Filtered {filtered_count} already-shown trailers from fresh API fetch")
-                # Fallback: if filtering exhausted all candidates, allow re-recommendation
-                if not fresh_vectors and candidate_data["vectors"]:
-                    logger.warning(f"All {filtered_count} fresh trailer candidates already shown for user {user_id} — falling back to unfiltered set")
-                    fresh_vectors = candidate_data["vectors"]
-                candidate_data["vectors"] = fresh_vectors
-                # Merge pool candidates into fresh fetch (fresh wins on collision)
-                if pool_vectors:
-                    merged = dict(pool_vectors)
-                    merged.update(fresh_vectors)
-                    candidate_data["vectors"] = merged
-                    logger.info(f"Merged {len(pool_vectors)} pool + {len(fresh_vectors)} fresh = {len(merged)} total trailer candidates")
+            # Always fetch fresh candidates from the API so interaction data (e.g. new
+            # likes) is re-validated on every request — the pool alone can go stale for
+            # up to its TTL and must never be served without this check.
+            logger.info(f"Fetching {fetch_limit} trailer candidates from API (pool has {len(pool_vectors)})...")
+            candidate_data = self._fetch_candidate_vectors(
+                user_id=user_id,
+                limit=fetch_limit,
+                content_type="TRAILERS",
+                cursor=cursor,
+                high_quality_cursor=high_quality_cursor
+            )
+            # Filter fresh candidates against shown set before merging
+            fresh_vectors = self.pool_cache.filter_shown(user_id, "trailers", candidate_data["vectors"])
+            filtered_count = len(candidate_data["vectors"]) - len(fresh_vectors)
+            if filtered_count:
+                logger.info(f"Filtered {filtered_count} already-shown trailers from fresh API fetch")
+            # Fallback: if filtering exhausted all candidates, re-admit a bounded number
+            # of already-shown items (capped at what this response actually needs)
+            # rather than starving the user of content or dumping the full unfiltered set
+            if not fresh_vectors and candidate_data["vectors"]:
+                fresh_vectors = dict(list(candidate_data["vectors"].items())[:limit])
+                logger.warning(f"All {filtered_count} fresh trailer candidates already shown for user {user_id} — falling back to {len(fresh_vectors)} unfiltered candidates (capped at {limit})")
+            candidate_data["vectors"] = fresh_vectors
+            # Merge pool candidates into fresh fetch (fresh wins on collision)
+            if pool_vectors:
+                merged = dict(pool_vectors)
+                merged.update(fresh_vectors)
+                candidate_data["vectors"] = merged
+                logger.info(f"Merged {len(pool_vectors)} pool + {len(fresh_vectors)} fresh = {len(merged)} total trailer candidates")
 
             candidate_count = len(candidate_data.get("vectors", {}))
             if not candidate_data["vectors"]:
