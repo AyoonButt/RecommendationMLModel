@@ -200,9 +200,12 @@ class EligibilityFilter:
         if not user_languages:
             return True
 
-        # Get post language
+        # Get post language - unknown language = accept (don't filter unknown
+        # content), consistent with _check_quality/_check_providers below
         categorical_features = post_meta.get('categoricalFeatures', {})
-        post_language = categorical_features.get('language', 'en')
+        post_language = categorical_features.get('language')
+        if not post_language:
+            return True
 
         # Check if post language is in user's accepted languages
         return post_language in user_languages

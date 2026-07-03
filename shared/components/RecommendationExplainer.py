@@ -11,6 +11,9 @@ import numpy as np
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
 
+from GenreTextClassifier import classify_overview_genres
+from MetadataEnhancer import extract_person_ids
+
 logger = logging.getLogger("recommendation-explainer")
 
 
@@ -113,6 +116,13 @@ class RecommendationExplainer:
             'engagement': 0.1
         }
 
+        # Penalty weight scaling for behaviorally inferred avoidance signals
+        # (not_interested history) - independent illustrative constants, same as
+        # boost_thresholds above; doesn't need to match MetadataEnhancer's exact
+        # penalty math, just needs to make the downweight visible and explain why.
+        self.penalty_weight_per_count = 0.15
+        self.penalty_weight_cap = 0.8
+
     def explain_recommendations(
         self,
         user_id: str,
@@ -122,7 +132,9 @@ class RecommendationExplainer:
         user_metadata: Dict[str, Any] = None,
         post_metadata_map: Dict[int, Dict] = None,
         rl_actions: List[Dict] = None,
-        content_type: str = "posts"
+        content_type: str = "posts",
+        avoided_genre_counts: Dict[str, int] = None,
+        avoided_person_counts: Dict[str, int] = None
     ) -> List[PostExplanation]:
         """
         Generate explanations for a list of recommendations.
@@ -136,6 +148,10 @@ class RecommendationExplainer:
             post_metadata_map: Metadata for each post {post_id: metadata}
             rl_actions: RL actions that were applied (if any)
             content_type: Type of content (posts/trailers)
+            avoided_genre_counts: User's genre -> not_interested count map
+                (behaviorally inferred, from AvoidedSignalTracker)
+            avoided_person_counts: User's person_id -> not_interested count map
+                (behaviorally inferred, from AvoidedSignalTracker)
 
         Returns:
             List of PostExplanation objects
@@ -144,6 +160,8 @@ class RecommendationExplainer:
 
         user_metadata = user_metadata or {}
         post_metadata_map = post_metadata_map or {}
+        avoided_genre_counts = avoided_genre_counts or {}
+        avoided_person_counts = avoided_person_counts or {}
 
         for rank, post_id in enumerate(post_ids):
             base_score = base_scores[rank] if rank < len(base_scores) else 0.0
@@ -166,6 +184,8 @@ class RecommendationExplainer:
             self._analyze_recency(explanation, post_metadata)
             self._analyze_demographic_match(explanation, user_metadata, post_metadata)
             self._analyze_engagement(explanation, post_metadata)
+            self._analyze_avoided_genre(explanation, post_metadata, avoided_genre_counts)
+            self._analyze_avoided_person(explanation, post_metadata, avoided_person_counts)
 
             # Analyze RL adjustments if present
             if rl_actions:
@@ -207,7 +227,9 @@ class RecommendationExplainer:
             return
 
         post_features = post_metadata.get('categoricalFeatures', {})
-        post_language = post_features.get('language', 'en')
+        post_language = post_features.get('language')
+        if not post_language:
+            return  # Don't claim a language match when the post's language is unknown
 
         if post_language in user_lang_prefs:
             weight = user_lang_prefs[post_language]
@@ -288,6 +310,70 @@ class RecommendationExplainer:
                 description=f"Features {matched_people[0]}",
                 details={"matched_people": matched_people[:3]}
             )
+
+    def _analyze_avoided_genre(self, explanation: PostExplanation, post_metadata: Dict,
+                               avoided_genre_counts: Dict[str, int]):
+        """
+        Explain a genre-based downweight from not_interested history.
+
+        Counterpart to _analyze_genre_match (positive affinity) - this surfaces
+        the negative signal from AvoidedSignalTracker's graduated genre penalty
+        (see MetadataEnhancer._calculate_avoided_genre_penalty), which previously
+        reduced the final score with no visible explanation factor.
+        """
+        if not avoided_genre_counts:
+            return
+
+        overview = post_metadata.get('overview', '')
+        if not overview:
+            return
+
+        classified_genres = classify_overview_genres(overview)
+        matched = {g: avoided_genre_counts[g] for g in classified_genres if g in avoided_genre_counts}
+        if not matched:
+            return
+
+        worst_genre = max(matched, key=matched.get)
+        count = matched[worst_genre]
+        explanation.add_reason(
+            factor="avoided_genre",
+            weight=-min(self.penalty_weight_per_count * count, self.penalty_weight_cap),
+            description=f"Deprioritized: similar to {worst_genre} content you marked not interested in",
+            details={"genre": worst_genre, "not_interested_count": count}
+        )
+
+    def _analyze_avoided_person(self, explanation: PostExplanation, post_metadata: Dict,
+                                avoided_person_counts: Dict[str, int]):
+        """
+        Explain a cast/crew-based downweight from not_interested history.
+
+        Counterpart to _analyze_cast_crew_match (positive affinity) - this surfaces
+        the negative signal from AvoidedSignalTracker's graduated person penalty
+        (see MetadataEnhancer._calculate_avoided_person_penalty), which previously
+        reduced the final score with no visible explanation factor.
+        """
+        if not avoided_person_counts:
+            return
+
+        person_ids = extract_person_ids(post_metadata)
+        if not person_ids:
+            return
+
+        matched = {
+            str(pid): avoided_person_counts[str(pid)] for pid in person_ids
+            if str(pid) in avoided_person_counts
+        }
+        if not matched:
+            return
+
+        worst_person_id = max(matched, key=matched.get)
+        count = matched[worst_person_id]
+        explanation.add_reason(
+            factor="avoided_person",
+            weight=-min(self.penalty_weight_per_count * count, self.penalty_weight_cap),
+            description="Deprioritized: features cast/crew from content you marked not interested in",
+            details={"person_id": worst_person_id, "not_interested_count": count}
+        )
 
     def _analyze_popularity(self, explanation: PostExplanation, post_metadata: Dict):
         """Check if post is highly rated."""

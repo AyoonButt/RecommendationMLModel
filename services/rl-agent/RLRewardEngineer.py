@@ -45,10 +45,23 @@ class RLRewardEngineer:
         Initialize the reward engineer.
         
         Args:
-            reward_config: Configuration for reward calculation
+            reward_config: Configuration for reward calculation. May be partial -
+                merged over the defaults rather than replacing them, since callers
+                (e.g. RLIntegrationManager) commonly only override a subset
+                (base_rewards/shaping_weights) and rely on this class's own
+                defaults for exploration/engagement/diversity/long_term.
             api_base_url: URL for Spring API (where comment analysis is stored)
         """
-        self.config = reward_config or self._get_default_config()
+        defaults = self._get_default_config()
+        if reward_config:
+            self.config = {
+                key: {**defaults[key], **reward_config[key]}
+                if isinstance(defaults.get(key), dict) and isinstance(reward_config.get(key), dict)
+                else reward_config.get(key, defaults.get(key))
+                for key in set(defaults) | set(reward_config)
+            }
+        else:
+            self.config = defaults
         
         # Track user interaction patterns for adaptive rewards
         self.user_interaction_history: Dict[int, deque] = defaultdict(lambda: deque(maxlen=100))

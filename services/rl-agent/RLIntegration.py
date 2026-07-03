@@ -49,7 +49,13 @@ class RLIntegrationManager:
         )
         
         self.reward_engineer = RLRewardEngineer(
-            reward_config=self.config['reward'],
+            # RLIntegrationManager's own config shape uses 'mapping' for interaction
+            # -> reward values; RLRewardEngineer's internal shape calls the same
+            # thing 'base_rewards' - translate here rather than at every read site.
+            reward_config={
+                'base_rewards': self.config['reward'].get('mapping', {}),
+                'shaping_weights': self.config['reward'].get('shaping_weights', {}),
+            },
             api_base_url=self.config.get('api_base_url', 'http://localhost:8080')
         )
         

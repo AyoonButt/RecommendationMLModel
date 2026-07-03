@@ -1335,6 +1335,18 @@ class CoreRecommendationsService:
                     post_metadata_map[post_id] = post_meta
             logger.debug(f"Explainer post_metadata_map: {len(post_metadata_map)} posts have metadata")
 
+              # Fetch behaviorally inferred avoidance signals so the explainer can
+            # surface why a post was downweighted, not just why it was boosted
+            avoided_genre_counts = {}
+            avoided_person_counts = {}
+            if getattr(self.metadata_enhancer, 'avoided_signal_penalty_enabled', False):
+                avoided_genre_counts = self.metadata_enhancer.avoided_signal_tracker.get_counts(
+                    str(user_id), 'genre'
+                )
+                avoided_person_counts = self.metadata_enhancer.avoided_signal_tracker.get_counts(
+                    str(user_id), 'person'
+                )
+
             # Call the explainer
             explanation_objects = self.explainer.explain_recommendations(
                 user_id=str(user_id),
@@ -1344,7 +1356,9 @@ class CoreRecommendationsService:
                 user_metadata=user_metadata,
                 post_metadata_map=post_metadata_map,
                 rl_actions=rl_actions,
-                content_type=content_type
+                content_type=content_type,
+                avoided_genre_counts=avoided_genre_counts,
+                avoided_person_counts=avoided_person_counts
             )
 
             # Format for API response
