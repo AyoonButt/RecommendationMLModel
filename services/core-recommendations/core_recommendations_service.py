@@ -602,27 +602,18 @@ class CoreRecommendationsService:
 
             # Always fetch fresh candidates from the API so interaction data (e.g. new
             # likes) is re-validated on every request — the pool alone can go stale for
-            # up to its TTL and must never be served without this check.
+            # up to its TTL and must never be served without this check. Paginates for
+            # more if filtering leaves too few, rather than re-showing seen content.
             logger.info(f"Fetching {fetch_limit} candidates from API (pool has {len(pool_vectors)})...")
-            candidate_data = self._fetch_candidate_vectors(
+            candidate_data = self._fetch_fresh_candidates(
                 user_id=user_id,
-                limit=fetch_limit,
+                fetch_limit=fetch_limit,
                 content_type="POSTS",
                 cursor=cursor,
-                high_quality_cursor=high_quality_cursor
+                high_quality_cursor=high_quality_cursor,
+                pool_content_type="posts"
             )
-            # Filter fresh candidates against shown set before merging
-            fresh_vectors = self.pool_cache.filter_shown(user_id, "posts", candidate_data["vectors"])
-            filtered_count = len(candidate_data["vectors"]) - len(fresh_vectors)
-            if filtered_count:
-                logger.info(f"Filtered {filtered_count} already-shown posts from fresh API fetch")
-            # Fallback: if filtering exhausted all candidates, re-admit a bounded number
-            # of already-shown items (capped at what this response actually needs)
-            # rather than starving the user of content or dumping the full unfiltered set
-            if not fresh_vectors and candidate_data["vectors"]:
-                fresh_vectors = dict(list(candidate_data["vectors"].items())[:limit])
-                logger.warning(f"All {filtered_count} fresh candidates already shown for user {user_id} — falling back to {len(fresh_vectors)} unfiltered candidates (capped at {limit})")
-            candidate_data["vectors"] = fresh_vectors
+            fresh_vectors = candidate_data["vectors"]
             # Merge pool candidates into fresh fetch (fresh wins on collision)
             if pool_vectors:
                 merged = dict(pool_vectors)
@@ -750,25 +741,15 @@ class CoreRecommendationsService:
             # likes) is re-validated on every request — the pool alone can go stale for
             # up to its TTL and must never be served without this check.
             logger.info(f"Fetching {fetch_limit} trailer candidates from API (pool has {len(pool_vectors)})...")
-            candidate_data = self._fetch_candidate_vectors(
+            candidate_data = self._fetch_fresh_candidates(
                 user_id=user_id,
-                limit=fetch_limit,
+                fetch_limit=fetch_limit,
                 content_type="TRAILERS",
                 cursor=cursor,
-                high_quality_cursor=high_quality_cursor
+                high_quality_cursor=high_quality_cursor,
+                pool_content_type="trailers"
             )
-            # Filter fresh candidates against shown set before merging
-            fresh_vectors = self.pool_cache.filter_shown(user_id, "trailers", candidate_data["vectors"])
-            filtered_count = len(candidate_data["vectors"]) - len(fresh_vectors)
-            if filtered_count:
-                logger.info(f"Filtered {filtered_count} already-shown trailers from fresh API fetch")
-            # Fallback: if filtering exhausted all candidates, re-admit a bounded number
-            # of already-shown items (capped at what this response actually needs)
-            # rather than starving the user of content or dumping the full unfiltered set
-            if not fresh_vectors and candidate_data["vectors"]:
-                fresh_vectors = dict(list(candidate_data["vectors"].items())[:limit])
-                logger.warning(f"All {filtered_count} fresh trailer candidates already shown for user {user_id} — falling back to {len(fresh_vectors)} unfiltered candidates (capped at {limit})")
-            candidate_data["vectors"] = fresh_vectors
+            fresh_vectors = candidate_data["vectors"]
             # Merge pool candidates into fresh fetch (fresh wins on collision)
             if pool_vectors:
                 merged = dict(pool_vectors)
@@ -1044,6 +1025,59 @@ class CoreRecommendationsService:
             logger.error(f"Request context - URL: {url}, Content Type: {content_type}")
             logger.error(f"Unexpected error: {str(e)}", exc_info=True)
             return {"vectors": {}, "nextCursor": None, "hasMore": False, "distribution": {}}
+
+    def _fetch_fresh_candidates(self, user_id: str, fetch_limit: int, content_type: str,
+                                cursor: Optional[str], high_quality_cursor: Optional[str],
+                                pool_content_type: str, max_extra_fetches: int = 2) -> Dict[str, Any]:
+        """
+        Fetch candidates from the API, filtering out already-shown posts. If
+        filtering leaves too few fresh candidates and the API has more to offer
+        (hasMore), paginate for additional pages rather than re-showing already-
+        seen content - bounded by max_extra_fetches so a user who has seen nearly
+        everything doesn't cause unbounded latency/API load on a single request.
+
+        Args:
+            user_id: User ID
+            fetch_limit: Desired candidate count
+            content_type: "POSTS" or "TRAILERS" (API param)
+            cursor: Pagination cursor to start from
+            high_quality_cursor: High-quality pagination cursor to start from
+            pool_content_type: "posts" or "trailers" (pool_cache key)
+            max_extra_fetches: Cap on additional pagination requests
+
+        Returns:
+            candidate_data dict with "vectors" containing only fresh candidates,
+            and pagination fields (nextCursor etc.) reflecting the last fetch made
+        """
+        candidate_data = self._fetch_candidate_vectors(
+            user_id=user_id, limit=fetch_limit, content_type=content_type,
+            cursor=cursor, high_quality_cursor=high_quality_cursor
+        )
+        fresh_vectors = self.pool_cache.filter_shown(user_id, pool_content_type, candidate_data["vectors"])
+        filtered_count = len(candidate_data["vectors"]) - len(fresh_vectors)
+        if filtered_count:
+            logger.info(f"Filtered {filtered_count} already-shown {pool_content_type} from fresh API fetch")
+        candidate_data["vectors"] = fresh_vectors
+
+        extra_fetches = 0
+        while (len(candidate_data["vectors"]) < fetch_limit and candidate_data.get("hasMore")
+               and extra_fetches < max_extra_fetches):
+            extra_fetches += 1
+            logger.info(f"Only {len(candidate_data['vectors'])}/{fetch_limit} fresh {pool_content_type} "
+                       f"candidates after filtering - fetching more "
+                       f"(attempt {extra_fetches}/{max_extra_fetches})")
+            next_batch = self._fetch_candidate_vectors(
+                user_id=user_id, limit=fetch_limit, content_type=content_type,
+                cursor=candidate_data.get("nextCursor"),
+                high_quality_cursor=candidate_data.get("nextHighQualityCursor")
+            )
+            next_fresh = self.pool_cache.filter_shown(user_id, pool_content_type, next_batch["vectors"])
+            merged_vectors = dict(candidate_data["vectors"])
+            merged_vectors.update(next_fresh)
+            # Carry forward pagination state from the latest fetch; accumulate vectors
+            candidate_data = {**next_batch, "vectors": merged_vectors}
+
+        return candidate_data
 
     def _get_user_vector(self, user_id: str) -> Optional[np.ndarray]:
         """Get user vector from Redis or API"""
