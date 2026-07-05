@@ -139,6 +139,12 @@ class MetadataEnhancer:
         self.avoided_signal_penalty_per_count = float(os.environ.get('AVOIDED_SIGNAL_PENALTY_PER_COUNT', '0.15'))
         self.avoided_signal_min_penalty_factor = float(os.environ.get('AVOIDED_SIGNAL_MIN_PENALTY_FACTOR', '0.2'))
 
+        # Resurfaced-favorite discount: candidates liked/saved long enough ago that the
+        # DB query's rare-resurface gate let them back into the pool (see
+        # PostLanguagesRepository.findScoredCandidates) still compete, just at a
+        # disadvantage, rather than relying solely on how infrequently they're included.
+        self.resurfaced_favorite_discount = float(os.environ.get('RESURFACED_FAVORITE_DISCOUNT', '0.5'))
+
         logger.info(f"TMDB ToS Compliant MetadataEnhancer initialized")
         logger.info(f"Velocity boost: enabled={self.velocity_boost_enabled}, "
                    f"threshold={self.velocity_trending_threshold}, "
@@ -214,6 +220,14 @@ class MetadataEnhancer:
                 avoided_genre_counts = self.avoided_signal_tracker.get_counts(user_id, 'genre')
                 avoided_person_counts = self.avoided_signal_tracker.get_counts(user_id, 'person')
 
+            # Candidates the user liked/saved long enough ago that they passed the
+            # rare-resurface gate in the candidate query (see
+            # PostLanguagesRepository.findScoredCandidates) are flagged, not excluded -
+            # apply a discount here so they compete at a disadvantage instead of at full
+            # strength, rather than relying on the low resurface probability alone to
+            # keep them out of view.
+            candidates_by_id = {c.get('postId'): c for c in candidates} if candidates else {}
+
             for i, post_id in enumerate(post_ids):
                 post_metadata = self._get_cached_metadata(f"post:{post_id}")
 
@@ -246,6 +260,16 @@ class MetadataEnhancer:
                     enhanced_scores[i] = self._apply_behavioral_boost(
                         enhanced_scores[i], post_metadata, int(post_id)
                     )
+
+                # Step 3b: Resurfaced-favorite discount (liked/saved a long time ago,
+                # let back into the candidate pool by the rare-resurface gate)
+                candidate_meta = candidates_by_id.get(int(post_id)) or candidates_by_id.get(post_id)
+                if candidate_meta:
+                    is_resurfaced = candidate_meta.get('metadata', {}).get('sourceDetails', {}).get(
+                        'isResurfacedFavorite', False
+                    )
+                    if is_resurfaced:
+                        enhanced_scores[i] *= self.resurfaced_favorite_discount
 
             # Ensure scores stay in valid range [0, 1]
             enhanced_scores = np.clip(enhanced_scores, 0.0, 1.0)
