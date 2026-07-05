@@ -16,6 +16,11 @@ COPY services/core-recommendations/requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Install PyTorch from the dedicated CPU-only wheel index (RLContextualBandit
+# needs torch) - the default PyPI wheel bundles CUDA/cuDNN runtime libraries
+# that add 1.5-2GB+ for a GPU this service never uses.
+RUN pip install --no-cache-dir torch==2.1.0 --index-url https://download.pytorch.org/whl/cpu
+
 # Copy shared components to both locations (for different import styles)
 COPY shared/components/ ./shared/components/
 COPY shared/components/*.py ./
