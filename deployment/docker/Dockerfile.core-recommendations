@@ -20,6 +20,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY shared/components/ ./shared/components/
 COPY shared/components/*.py ./
 
+# Copy RL agent modules flat into /app so RLEnhancedMetadataEnhancer's
+# `from RLIntegration import ...` (and its own local imports of
+# RLExperienceCollector/RLRewardEngineer/RLStateRepresentation/RLContextualBandit)
+# actually resolve - without this, RL_AVAILABLE silently stays False at startup
+# and the service falls back to the non-RL MetadataEnhancer.
+COPY services/rl-agent/*.py ./
+
 # Copy application code
 COPY services/core-recommendations/ ./
 

@@ -1,0 +1,46 @@
+{
+  "summary": {
+    "num_users_requested": 1,
+    "num_evaluated": 1,
+    "num_skipped": 0,
+    "skip_reasons": [],
+    "mean_precision@5": 0.2,
+    "mean_recall@5": 0.041666666666666664,
+    "mean_ndcg@5": 0.13120507751234178,
+    "hit_rate@5": 1.0,
+    "mean_precision@10": 0.2,
+    "mean_recall@10": 0.08333333333333333,
+    "mean_ndcg@10": 0.1635413866202963,
+    "hit_rate@10": 1.0,
+    "mean_precision@20": 0.45,
+    "mean_recall@20": 0.375,
+    "mean_ndcg@20": 0.3521472429065133,
+    "hit_rate@20": 1.0,
+    "mean_pairwise_auc": 0.9725150602409639,
+    "mean_score_std": 0.07329726964235306
+  },
+  "per_user": [
+    {
+      "user_id": "7",
+      "skipped": false,
+      "num_positives": 24,
+      "num_negatives": 332,
+      "pool_size": 398,
+      "score_mean": 0.6110475063323975,
+      "score_std": 0.07329726964235306,
+      "precision@5": 0.2,
+      "recall@5": 0.041666666666666664,
+      "ndcg@5": 0.13120507751234178,
+      "hit_rate@5": 1.0,
+      "precision@10": 0.2,
+      "recall@10": 0.08333333333333333,
+      "ndcg@10": 0.1635413866202963,
+      "hit_rate@10": 1.0,
+      "precision@20": 0.45,
+      "recall@20": 0.375,
+      "ndcg@20": 0.3521472429065133,
+      "hit_rate@20": 1.0,
+      "pairwise_auc": 0.9725150602409639
+    }
+  ]
+}

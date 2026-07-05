@@ -1,0 +1,377 @@
+{
+  "summary": {
+    "num_users_requested": 40,
+    "num_evaluated": 7,
+    "num_skipped": 33,
+    "skip_reasons": [
+      "fewer than 2 liked/saved posts in history (0)",
+      "fewer than 2 liked/saved posts in history (0)",
+      "fewer than 2 liked/saved posts in history (0)",
+      "fewer than 2 liked/saved posts in history (0)",
+      "fewer than 2 liked/saved posts in history (0)",
+      "fewer than 2 liked/saved posts in history (0)",
+      "post vectors unavailable for 4/4 liked/saved posts",
+      "fewer than 2 liked/saved posts in history (0)",
+      "fewer than 2 liked/saved posts in history (0)",
+      "fewer than 2 liked/saved posts in history (0)",
+      "fewer than 2 liked/saved posts in history (0)",
+      "fewer than 2 liked/saved posts in history (0)",
+      "fewer than 2 liked/saved posts in history (1)",
+      "fewer than 2 liked/saved posts in history (0)",
+      "fewer than 2 liked/saved posts in history (0)",
+      "fewer than 2 liked/saved posts in history (0)",
+      "fewer than 2 liked/saved posts in history (0)",
+      "fewer than 2 liked/saved posts in history (0)",
+      "fewer than 2 liked/saved posts in history (0)",
+      "fewer than 2 liked/saved posts in history (0)",
+      "fewer than 2 liked/saved posts in history (0)",
+      "fewer than 2 liked/saved posts in history (0)",
+      "fewer than 2 liked/saved posts in history (1)",
+      "fewer than 2 liked/saved posts in history (0)",
+      "fewer than 2 liked/saved posts in history (0)",
+      "fewer than 2 liked/saved posts in history (0)",
+      "fewer than 2 liked/saved posts in history (0)",
+      "fewer than 2 liked/saved posts in history (0)",
+      "fewer than 2 liked/saved posts in history (0)",
+      "fewer than 2 liked/saved posts in history (0)",
+      "fewer than 2 liked/saved posts in history (0)",
+      "fewer than 2 liked/saved posts in history (0)",
+      "fewer than 2 liked/saved posts in history (0)"
+    ],
+    "mean_precision@5": 0.08571428571428572,
+    "mean_recall@5": 0.07738095238095238,
+    "mean_ndcg@5": 0.07550386921155386,
+    "hit_rate@5": 0.2857142857142857,
+    "mean_precision@10": 0.08571428571428572,
+    "mean_recall@10": 0.15476190476190477,
+    "mean_ndcg@10": 0.11539005250988958,
+    "hit_rate@10": 0.5714285714285714,
+    "mean_precision@20": 0.05,
+    "mean_recall@20": 0.16071428571428573,
+    "mean_ndcg@20": 0.1120547951922421,
+    "hit_rate@20": 0.5714285714285714,
+    "mean_pairwise_auc": 0.4648395524339743,
+    "mean_score_std": 0.03617759368249348
+  },
+  "per_user": [
+    {
+      "user_id": "1",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    },
+    {
+      "user_id": "2",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    },
+    {
+      "user_id": "3",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    },
+    {
+      "user_id": "4",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    },
+    {
+      "user_id": "5",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    },
+    {
+      "user_id": "6",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    },
+    {
+      "user_id": "7",
+      "skipped": false,
+      "num_positives": 24,
+      "num_negatives": 332,
+      "pool_size": 398,
+      "score_mean": 0.7001192569732666,
+      "score_std": 0.04414350539445877,
+      "precision@5": 0.2,
+      "recall@5": 0.041666666666666664,
+      "ndcg@5": 0.13120507751234178,
+      "hit_rate@5": 1.0,
+      "precision@10": 0.2,
+      "recall@10": 0.08333333333333333,
+      "ndcg@10": 0.15850703974098102,
+      "hit_rate@10": 1.0,
+      "precision@20": 0.15,
+      "recall@20": 0.125,
+      "ndcg@20": 0.13516023851744863,
+      "hit_rate@20": 1.0,
+      "pairwise_auc": 0.3600652610441767
+    },
+    {
+      "user_id": "8",
+      "skipped": true,
+      "reason": "post vectors unavailable for 4/4 liked/saved posts"
+    },
+    {
+      "user_id": "9",
+      "skipped": false,
+      "num_positives": 2,
+      "num_negatives": 372,
+      "pool_size": 560,
+      "score_mean": 0.6445795297622681,
+      "score_std": 0.02185092307627201,
+      "precision@5": 0.0,
+      "recall@5": 0.0,
+      "ndcg@5": 0.0,
+      "hit_rate@5": 0.0,
+      "precision@10": 0.0,
+      "recall@10": 0.0,
+      "ndcg@10": 0.0,
+      "hit_rate@10": 0.0,
+      "precision@20": 0.0,
+      "recall@20": 0.0,
+      "ndcg@20": 0.0,
+      "hit_rate@20": 0.0,
+      "pairwise_auc": 0.5994623655913979
+    },
+    {
+      "user_id": "10",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    },
+    {
+      "user_id": "11",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    },
+    {
+      "user_id": "12",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    },
+    {
+      "user_id": "13",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    },
+    {
+      "user_id": "14",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    },
+    {
+      "user_id": "15",
+      "skipped": false,
+      "num_positives": 3,
+      "num_negatives": 244,
+      "pool_size": 386,
+      "score_mean": 0.6740689277648926,
+      "score_std": 0.0276130773127079,
+      "precision@5": 0.0,
+      "recall@5": 0.0,
+      "ndcg@5": 0.0,
+      "hit_rate@5": 0.0,
+      "precision@10": 0.0,
+      "recall@10": 0.0,
+      "ndcg@10": 0.0,
+      "hit_rate@10": 0.0,
+      "precision@20": 0.0,
+      "recall@20": 0.0,
+      "ndcg@20": 0.0,
+      "hit_rate@20": 0.0,
+      "pairwise_auc": 0.3797814207650273
+    },
+    {
+      "user_id": "16",
+      "skipped": false,
+      "num_positives": 4,
+      "num_negatives": 25,
+      "pool_size": 222,
+      "score_mean": 0.6531932950019836,
+      "score_std": 0.05220984295010567,
+      "precision@5": 0.0,
+      "recall@5": 0.0,
+      "ndcg@5": 0.0,
+      "hit_rate@5": 0.0,
+      "precision@10": 0.1,
+      "recall@10": 0.25,
+      "ndcg@10": 0.11284514134893527,
+      "hit_rate@10": 1.0,
+      "precision@20": 0.05,
+      "recall@20": 0.25,
+      "ndcg@20": 0.11284514134893527,
+      "hit_rate@20": 1.0,
+      "pairwise_auc": 0.32
+    },
+    {
+      "user_id": "17",
+      "skipped": false,
+      "num_positives": 4,
+      "num_negatives": 85,
+      "pool_size": 265,
+      "score_mean": 0.6823517680168152,
+      "score_std": 0.04559099301695824,
+      "precision@5": 0.4,
+      "recall@5": 0.5,
+      "ndcg@5": 0.3973220069685352,
+      "hit_rate@5": 1.0,
+      "precision@10": 0.2,
+      "recall@10": 0.5,
+      "ndcg@10": 0.3973220069685352,
+      "hit_rate@10": 1.0,
+      "precision@20": 0.1,
+      "recall@20": 0.5,
+      "ndcg@20": 0.3973220069685352,
+      "hit_rate@20": 1.0,
+      "pairwise_auc": 0.5794117647058824
+    },
+    {
+      "user_id": "18",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (1)"
+    },
+    {
+      "user_id": "19",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    },
+    {
+      "user_id": "20",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    },
+    {
+      "user_id": "21",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    },
+    {
+      "user_id": "22",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    },
+    {
+      "user_id": "23",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    },
+    {
+      "user_id": "24",
+      "skipped": false,
+      "num_positives": 15,
+      "num_negatives": 267,
+      "pool_size": 449,
+      "score_mean": 0.6948637962341309,
+      "score_std": 0.038384098559617996,
+      "precision@5": 0.0,
+      "recall@5": 0.0,
+      "ndcg@5": 0.0,
+      "hit_rate@5": 0.0,
+      "precision@10": 0.0,
+      "recall@10": 0.0,
+      "ndcg@10": 0.0,
+      "hit_rate@10": 0.0,
+      "precision@20": 0.0,
+      "recall@20": 0.0,
+      "ndcg@20": 0.0,
+      "hit_rate@20": 0.0,
+      "pairwise_auc": 0.47515605493133584
+    },
+    {
+      "user_id": "25",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    },
+    {
+      "user_id": "26",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    },
+    {
+      "user_id": "27",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    },
+    {
+      "user_id": "28",
+      "skipped": false,
+      "num_positives": 4,
+      "num_negatives": 50,
+      "pool_size": 54,
+      "score_mean": 0.7427486181259155,
+      "score_std": 0.023450715467333794,
+      "precision@5": 0.0,
+      "recall@5": 0.0,
+      "ndcg@5": 0.0,
+      "hit_rate@5": 0.0,
+      "precision@10": 0.1,
+      "recall@10": 0.25,
+      "ndcg@10": 0.13905617951077562,
+      "hit_rate@10": 1.0,
+      "precision@20": 0.05,
+      "recall@20": 0.25,
+      "ndcg@20": 0.13905617951077562,
+      "hit_rate@20": 1.0,
+      "pairwise_auc": 0.54
+    },
+    {
+      "user_id": "29",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    },
+    {
+      "user_id": "30",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (1)"
+    },
+    {
+      "user_id": "31",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    },
+    {
+      "user_id": "32",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    },
+    {
+      "user_id": "33",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    },
+    {
+      "user_id": "34",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    },
+    {
+      "user_id": "35",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    },
+    {
+      "user_id": "36",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    },
+    {
+      "user_id": "37",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    },
+    {
+      "user_id": "38",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    },
+    {
+      "user_id": "39",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    },
+    {
+      "user_id": "40",
+      "skipped": true,
+      "reason": "fewer than 2 liked/saved posts in history (0)"
+    }
+  ]
+}
