@@ -243,8 +243,18 @@ class RecommendationExplainer:
 
     def _analyze_genre_match(self, explanation: PostExplanation,
                             user_metadata: Dict, post_metadata: Dict):
-        """Check genre alignment with user preferences."""
-        user_interests = user_metadata.get('interestWeights', {})
+        """Check genre alignment with user preferences.
+
+        Reads user_metadata['preferredGenres'] - the same declared-preference
+        source EligibilityFilter.calculate_preferred_genre_boost() actually
+        scores against - rather than interestWeights, so the "why" text shown
+        here always matches what actually happened in scoring. interestWeights
+        is a behavior-blended derivative (see MetadataService.kt) that can
+        diverge from what the user declared, which previously meant this reason
+        could reference a genre match that didn't correspond to any real boost,
+        or omit one that did.
+        """
+        user_interests = user_metadata.get('preferredGenres', {})
         post_genres = post_metadata.get('genreWeights', {})
 
         if not user_interests or not post_genres:

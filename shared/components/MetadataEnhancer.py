@@ -132,6 +132,11 @@ class MetadataEnhancer:
         # Avoid Genres Configuration (declared user preference, service-gated endpoint)
         self.avoid_genres_enabled = os.environ.get('AVOID_GENRES_ENABLED', 'true').lower() == 'true'
 
+        # Preferred Genres Configuration (declared user preference, service-gated endpoint -
+        # the raw onboarding-declared genreIds/priority, NOT the behavior-blended
+        # interestWeights already present in /metadata. See calculate_preferred_genre_boost.)
+        self.preferred_genres_enabled = os.environ.get('PREFERRED_GENRES_ENABLED', 'true').lower() == 'true'
+
         # Inferred Avoided Signals (behaviorally derived from not_interested interactions,
         # covers multiple categories - genre, cast/crew, ... - see AvoidedSignalTracker)
         self.avoided_signal_tracker = AvoidedSignalTracker(redis_client)
@@ -151,6 +156,7 @@ class MetadataEnhancer:
                    f"boost={self.velocity_trending_boost}")
         logger.info(f"Behavioral genres: enabled={self.behavioral_genres_enabled}")
         logger.info(f"Avoid genres: enabled={self.avoid_genres_enabled}")
+        logger.info(f"Preferred genres: enabled={self.preferred_genres_enabled}")
         logger.info(f"Avoided signal penalty: enabled={self.avoided_signal_penalty_enabled}, "
                    f"per_count={self.avoided_signal_penalty_per_count}, "
                    f"min_factor={self.avoided_signal_min_penalty_factor}")
@@ -177,6 +183,8 @@ class MetadataEnhancer:
         Enhancement pipeline:
         1. Eligibility filtering (TMDB data - boolean pass/fail)
         2. Behavioral genre soft filter (penalize non-matching genres)
+        2a. Preferred genre boost (reward genres declared during onboarding -
+            the positive counterpart to 2, which only ever penalizes)
         2b. Avoided-genre soft penalty (graduated, based on not_interested history)
         2c. Avoided-person soft penalty (graduated, cast/crew, based on not_interested history)
         3. Behavioral engagement boost (app data ONLY)
@@ -242,6 +250,13 @@ class MetadataEnhancer:
                         post_metadata, user_metadata
                     )
                     enhanced_scores[i] *= genre_penalty
+
+                    # Step 2a: Declared-preference genre boost — the positive counterpart
+                    # to Step 2 above, which only ever penalizes, never rewards.
+                    preference_boost = self.eligibility_filter.calculate_preferred_genre_boost(
+                        post_metadata, user_metadata
+                    )
+                    enhanced_scores[i] *= preference_boost
 
                 # Step 2b: Avoided-genre soft penalty (behaviorally inferred, graduated)
                 if post_metadata and avoided_genre_counts:
@@ -807,6 +822,10 @@ class MetadataEnhancer:
                         avoid_genres = self._fetch_avoid_genres(entity_id)
                         if avoid_genres:
                             metadata['avoidGenres'] = avoid_genres
+                    if self.preferred_genres_enabled:
+                        preferred_genres = self._fetch_preferred_genres(entity_id)
+                        if preferred_genres:
+                            metadata['preferredGenres'] = preferred_genres
                     return metadata
                 else:
                     logger.warning(f"API returned status {response.status_code} for {key}")
@@ -885,6 +904,47 @@ class MetadataEnhancer:
         except Exception as e:
             logger.debug(f"Error fetching avoid-genres for user {user_id}: {e}")
             return []
+
+    def _fetch_preferred_genres(self, user_id: str) -> Dict[str, float]:
+        """
+        Fetch a user's DECLARED preferred-genres (with priority) from the
+        service-gated Spring API endpoint - the raw onboarding selections, not
+        the behavior-blended interestWeights already present in /metadata.
+
+        Priority is normalized to a 0.5-1.0 weight the same way
+        MetadataService.kt's explicit-preference step does, so a "priority 10"
+        genre and a "priority 1" genre aren't treated identically.
+
+        Args:
+            user_id: User ID
+
+        Returns:
+            Dict of {genre_name: weight}, weight in 0.5-1.0
+        """
+        try:
+            url = f"{self.api_base_url}/api/internal/users/{user_id}/preferredGenres"
+            headers = self._get_auth_headers()
+            response = requests.get(url, headers=headers, timeout=5)
+
+            if response.status_code != 200:
+                logger.debug(f"Preferred-genres API returned {response.status_code} for user {user_id}")
+                return {}
+
+            data = response.json()
+            if not data:
+                return {}
+
+            max_priority = max((g.get('priority', 0) for g in data), default=0) or 1
+            preferred_genres = {
+                g['genre_name']: 0.5 + (g.get('priority', 0) / max_priority) * 0.5
+                for g in data if g.get('genre_name')
+            }
+            logger.debug(f"Fetched {len(preferred_genres)} preferred-genres for user {user_id}")
+            return preferred_genres
+
+        except Exception as e:
+            logger.debug(f"Error fetching preferred-genres for user {user_id}: {e}")
+            return {}
 
     def _cleanup_memory_cache(self, current_time: float):
         """Clean up old entries from memory cache."""

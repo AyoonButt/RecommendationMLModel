@@ -35,7 +35,8 @@ class EligibilityFilter:
     """
 
     def __init__(self, quality_threshold: float = 5.0, min_vote_count: int = 10,
-                 behavioral_genres_enabled: bool = True):
+                 behavioral_genres_enabled: bool = True,
+                 preferred_genre_boost_enabled: bool = True):
         """
         Initialize the eligibility filter.
 
@@ -43,13 +44,24 @@ class EligibilityFilter:
             quality_threshold: Minimum vote average for quality filter (default 5.0)
             min_vote_count: Minimum votes required to apply quality filter (default 10)
             behavioral_genres_enabled: Enable behavioral genre soft filter (default True)
+            preferred_genre_boost_enabled: Enable declared-preference genre boost (default True)
         """
         self.quality_threshold = quality_threshold
         self.min_vote_count = min_vote_count
         self.behavioral_genres_enabled = behavioral_genres_enabled
+        self.preferred_genre_boost_enabled = preferred_genre_boost_enabled
 
         # Soft filter penalty factor for behavioral genres
         self.behavioral_genre_penalty = 0.8  # 20% penalty if no genre match
+
+        # Positive counterpart to behavioral_genre_penalty above, but for DECLARED
+        # preferences (user_metadata['interestWeights']) rather than inferred ones -
+        # behavioral/avoid genres only ever apply penalties, so a stated "Horror"
+        # preference from onboarding never actually raised a horror post's score.
+        # Scale/cap keep this from overwhelming ml_similarity's base signal - a
+        # perfect single-genre match (weight 1.0 on both sides) yields ~1.15x.
+        self.preferred_genre_boost_scale = 0.15
+        self.preferred_genre_boost_cap = 0.3  # max +30% regardless of overlap strength
 
         # Statistics tracking
         self.stats = {
@@ -153,6 +165,55 @@ class EligibilityFilter:
             # No match - apply soft penalty
             logger.debug(f"Behavioral genre penalty applied: user={user_genres}, post={list(post_genres)}")
             return self.behavioral_genre_penalty
+
+    def calculate_preferred_genre_boost(self, post_metadata: Dict, user_metadata: Dict) -> float:
+        """
+        Calculate a positive boost factor from overlap between the user's DECLARED
+        genre preferences (user_metadata['preferredGenres'] - the raw onboarding
+        selections, fetched separately via _fetch_preferred_genres, NOT the
+        behavior-blended interestWeights already present in /metadata) and the
+        post's genres. This is the missing positive counterpart to
+        calculate_soft_filters()'s behavioral penalty above - that one only ever
+        penalizes a mismatch with inferred behavior, it never rewards a match with
+        what the user actually told us they want.
+
+        interestWeights was deliberately NOT used here: it's a 60/40 blend of
+        stated preference with interaction history (diluting a declared choice
+        the moment any behavior exists), avoided genres are force-clamped into it
+        regardless of stated priority, and it falls back to globally-popular
+        genres for a user with no signal yet at all - none of which is what
+        "boost what they said they want" should mean.
+
+        Returns:
+            Boost factor >= 1.0 (1.0 = no boost, higher = stronger preference match)
+        """
+        if not self.preferred_genre_boost_enabled:
+            return 1.0
+
+        user_interest_weights = user_metadata.get('preferredGenres', {})
+        if not user_interest_weights:
+            return 1.0
+
+        post_genre_weights = post_metadata.get('genreWeights', {})
+        if not post_genre_weights:
+            return 1.0
+
+        # Weighted overlap: sum of (user interest weight * post genre weight) for
+        # every genre the post and the user's declared preferences share.
+        overlap_score = sum(
+            user_interest_weights.get(genre, 0.0) * post_weight
+            for genre, post_weight in post_genre_weights.items()
+        )
+
+        if overlap_score <= 0:
+            return 1.0
+
+        boost = 1.0 + min(
+            overlap_score * self.preferred_genre_boost_scale,
+            self.preferred_genre_boost_cap
+        )
+        logger.debug(f"Preferred genre boost applied: overlap_score={overlap_score:.3f}, boost={boost:.3f}")
+        return boost
 
     def check_eligibility_batch(self, post_ids: List[int],
                                 post_metadata_map: Dict[int, Dict],
@@ -362,7 +423,8 @@ class EligibilityFilter:
 
 def create_eligibility_filter(quality_threshold: float = 5.0,
                               min_vote_count: int = 10,
-                              behavioral_genres_enabled: bool = True) -> EligibilityFilter:
+                              behavioral_genres_enabled: bool = True,
+                              preferred_genre_boost_enabled: bool = True) -> EligibilityFilter:
     """
     Factory function to create an eligibility filter.
 
@@ -370,6 +432,7 @@ def create_eligibility_filter(quality_threshold: float = 5.0,
         quality_threshold: Minimum vote average for quality filter
         min_vote_count: Minimum votes required to apply quality filter
         behavioral_genres_enabled: Enable behavioral genre soft filter
+        preferred_genre_boost_enabled: Enable declared-preference genre boost
 
     Returns:
         Configured EligibilityFilter instance
@@ -377,5 +440,6 @@ def create_eligibility_filter(quality_threshold: float = 5.0,
     return EligibilityFilter(
         quality_threshold=quality_threshold,
         min_vote_count=min_vote_count,
-        behavioral_genres_enabled=behavioral_genres_enabled
+        behavioral_genres_enabled=behavioral_genres_enabled,
+        preferred_genre_boost_enabled=preferred_genre_boost_enabled
     )
