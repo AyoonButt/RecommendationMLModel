@@ -331,9 +331,12 @@ class MetadataEnhancer:
                     )
                     boost_factor += engagement_boost
 
-            # App-specific engagement ratios (if available)
+            # App-specific engagement ratios (if available). Ratios are meaningless noise
+            # at tiny sample sizes - view_count=1, like_count=1 gives like_ratio=1.0, the
+            # max possible boost off a single interaction. Mirrors the click_count > 10
+            # floor above: require a minimum absolute view count before trusting the ratio.
             view_count = post_metadata.get('viewCount', 0)
-            if view_count > 0:
+            if view_count >= 10:
                 like_count = post_metadata.get('likeCount', 0)
                 like_ratio = like_count / view_count
                 if like_ratio > 0.1:
