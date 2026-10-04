@@ -720,7 +720,9 @@ class MetadataEnhancer:
                 # Response is Map<Int, {"more_info": Map<String, Any?>}?> - convert
                 # string keys to int and unwrap/normalize the more_info payload
                 raw_response = response.json()
-                return {int(k): self._normalize_post_metadata(v) for k, v in raw_response.items()}
+                metadata = {int(k): self._normalize_post_metadata(v) for k, v in raw_response.items()}
+                self._merge_sub_genres(metadata, post_ids)
+                return metadata
             else:
                 logger.warning(f"Batch API returned status {response.status_code}")
                 return None
@@ -728,6 +730,34 @@ class MetadataEnhancer:
         except Exception as e:
             logger.warning(f"Error fetching batch metadata from API: {e}")
             return None
+
+    def _merge_sub_genres(self, metadata: Dict[int, Dict], post_ids: List[int]) -> None:
+        """
+        Enrich each post's metadata with its sub-genre classifications fetched
+        from the Spring API (post_sub_genres). Best-effort: a sub-genre fetch
+        failure leaves the metadata without postSubGenres and the eligibility /
+        diversity / RL consumers simply skip sub-genre logic.
+        """
+        try:
+            url = f"{self.api_base_url}/api/internal/posts/sub-genres"
+            headers = {'Content-Type': 'application/json'}
+            headers.update(self._get_auth_headers())
+            response = requests.get(
+                url, params={'postIds': ','.join(str(p) for p in post_ids)},
+                headers=headers, timeout=10
+            )
+            if response.status_code != 200:
+                logger.debug(f"Sub-genre API returned status {response.status_code}, skipping merge")
+                return
+
+            data = response.json()
+            post_sub_genres = data.get('postSubGenres', {})
+            for post_id, sub_genres in post_sub_genres.items():
+                pid = int(post_id)
+                if pid in metadata and metadata[pid] is not None:
+                    metadata[pid]['postSubGenres'] = sub_genres
+        except Exception as e:
+            logger.debug(f"Error merging sub-genres into metadata: {e}")
 
     def _normalize_post_metadata(self, raw: Optional[Dict]) -> Optional[Dict]:
         """

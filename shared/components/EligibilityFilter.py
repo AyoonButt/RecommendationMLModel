@@ -70,6 +70,7 @@ class EligibilityFilter:
             'filtered_quality': 0,
             'filtered_providers': 0,
             'filtered_avoid_genres': 0,
+            'filtered_avoid_sub_genres': 0,
             'passed': 0,
             'behavioral_genre_checks': 0,
             'behavioral_genre_matches': 0
@@ -117,6 +118,11 @@ class EligibilityFilter:
         # and via overview text classification for genres missing from genreWeights)
         if not self._check_avoid_genres(post_metadata, user_metadata):
             self.stats['filtered_avoid_genres'] += 1
+            return False
+
+        # Avoid-sub-genres filter (finer-grained classification from app data)
+        if not self._check_avoid_sub_genres(post_metadata, user_metadata):
+            self.stats['filtered_avoid_sub_genres'] += 1
             return False
 
         self.stats['passed'] += 1
@@ -350,6 +356,38 @@ class EligibilityFilter:
         classified_genres = classify_overview_genres(overview)
         return not any(g.lower() in avoid_genres_lower for g in classified_genres)
 
+    def _check_avoid_sub_genres(self, post_meta: Dict, user_meta: Dict) -> bool:
+        """
+        Check if the post's sub-genre classifications overlap the user's avoided
+        sub-genres (finer-grained than TMDB genre labels).
+
+        Sub-genre data comes from the Spring API (post_sub_genres) surfaced in
+        post metadata as postSubGenres, and user's avoided sub-genres as
+        avoidSubGenres. A post is filtered out if any of its sub-genres is avoided
+        with affinity above the threshold.
+
+        Args:
+            post_meta: Post metadata (postSubGenres - app-computed sub-genre affinities)
+            user_meta: User metadata (avoidSubGenres - user's declared preference)
+
+        Returns:
+            Boolean: True if post is acceptable (no avoided sub-genre match)
+        """
+        avoid_sub_genres = user_meta.get('avoidSubGenres', [])
+        post_sub_genres = post_meta.get('postSubGenres', [])
+        if not avoid_sub_genres or not post_sub_genres:
+            return True
+
+        avoid_set = {sg.get('subGenreId') for sg in avoid_sub_genres} if isinstance(avoid_sub_genres, list) \
+            else {int(sg) for sg in avoid_sub_genres}
+
+        for sub_genre in post_sub_genres:
+            sub_id = sub_genre.get('subGenreId')
+            affinity = sub_genre.get('affinity', 0.0)
+            if sub_id in avoid_set and affinity > 0.3:
+                return False
+        return True
+
     def get_filter_reasons(self, post_metadata: Dict, user_metadata: Dict) -> List[str]:
         """
         Get detailed reasons why a post was filtered (for debugging/logging).
@@ -386,6 +424,12 @@ class EligibilityFilter:
             reasons.append(f"Avoid-genre match via overview: user_avoids={avoid_genres}, "
                           f"overview_classified_as={sorted(classified)}")
 
+        if not self._check_avoid_sub_genres(post_metadata, user_metadata):
+            avoid_sub_genres = user_metadata.get('avoidSubGenres', [])
+            post_sub_genres = post_metadata.get('postSubGenres', [])
+            reasons.append(f"Avoid-sub-genre match: user_avoids={avoid_sub_genres}, "
+                          f"post_sub_genres={post_sub_genres}")
+
         return reasons
 
     def get_stats(self) -> Dict[str, any]:
@@ -401,6 +445,7 @@ class EligibilityFilter:
             'quality_filter_rate': self.stats['filtered_quality'] / total,
             'provider_filter_rate': self.stats['filtered_providers'] / total,
             'avoid_genre_filter_rate': self.stats['filtered_avoid_genres'] / total,
+            'avoid_sub_genre_filter_rate': self.stats['filtered_avoid_sub_genres'] / total,
             'behavioral_genre_match_rate': (
                 self.stats['behavioral_genre_matches'] / self.stats['behavioral_genre_checks']
                 if self.stats['behavioral_genre_checks'] > 0 else 0.0
@@ -415,6 +460,7 @@ class EligibilityFilter:
             'filtered_quality': 0,
             'filtered_providers': 0,
             'filtered_avoid_genres': 0,
+            'filtered_avoid_sub_genres': 0,
             'passed': 0,
             'behavioral_genre_checks': 0,
             'behavioral_genre_matches': 0

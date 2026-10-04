@@ -94,7 +94,9 @@ class RLRewardEngineer:
                 'report': -1.2,
                 'long_view': 0.5,
                 'return_visit': 0.7,
-                'download': 0.9
+                'download': 0.9,
+                'watchlist_add': 0.85,
+                'watchlist_remove': -0.3
             },
             
             # Reward shaping weights
@@ -274,7 +276,7 @@ class RLRewardEngineer:
                 bonus = config['time_bonuses'][i]
         
         # Interaction depth bonus
-        if interaction_type in ['comment', 'share', 'download']:
+        if interaction_type in ['comment', 'share', 'download', 'watchlist_add']:
             bonus += config['interaction_depth_bonus']
         
         # Sequential interaction bonus (multiple interactions with same content)

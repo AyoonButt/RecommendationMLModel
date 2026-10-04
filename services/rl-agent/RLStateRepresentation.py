@@ -83,7 +83,7 @@ class RLStateBuilder:
         self.session_dim = 6
         self.sequence_dim = 10
         self.user_preference_dim = 16
-        self.content_features_dim = 12
+        self.content_features_dim = 16  # 12 behavioral + 4 sub-genre affinity
         self.social_signals_dim = 8
         self.interaction_history_dim = 20
         self.comment_analysis_dim = 13  # New: comment analysis features
@@ -299,7 +299,7 @@ class RLStateBuilder:
         
         # Normalize counts
         total_recent = len(recent_interactions)
-        like_ratio = interaction_type_counts['like'] / total_recent
+        like_ratio = (interaction_type_counts['like'] + interaction_type_counts['watchlist_add']) / total_recent
         save_ratio = interaction_type_counts['save'] / total_recent
         skip_ratio = interaction_type_counts['skip'] / total_recent
         not_interested_ratio = interaction_type_counts['not_interested'] / total_recent
@@ -384,7 +384,7 @@ class RLStateBuilder:
             # Get genres from the interaction record (stored at interaction time)
             for genre in interaction.get('genres', []):
                 genre_engagement[genre]['total'] += 1
-                if interaction.get('type') in ['like', 'save', 'share']:
+                if interaction.get('type') in ['like', 'save', 'share', 'watchlist_add']:
                     genre_engagement[genre]['pos'] += 1
                 elif interaction.get('type') in ['not_interested', 'skip']:
                     genre_engagement[genre]['neg'] += 1
@@ -484,10 +484,11 @@ class RLStateBuilder:
         TMDB ToS Compliant: This method derives features from app behavioral data,
         NOT from TMDB metadata like voteAverage, popularity, genreWeights.
 
-        Behavioral features (12D total):
+        Behavioral features (16D total):
         - 4D: Comment-based features (sentiment from app comment analysis)
         - 4D: Interaction rates (clicks, like_rate, save_rate, share_rate)
         - 4D: Engagement velocity (recent activity trends)
+        - 4D: Sub-genre affinity (top sub-genre affinities from app-computed post_sub_genres)
         """
         post_metadata = context.get('post_metadata', {})
 
@@ -500,8 +501,11 @@ class RLStateBuilder:
         # 4D: Engagement velocity (recent activity trends from app)
         velocity_features = self._get_engagement_velocity(post_metadata)
 
+        # 4D: Sub-genre affinity (finer-grained genre signal from app data)
+        sub_genre_features = self._get_sub_genre_features(post_metadata)
+
         content_features = np.concatenate([
-            comment_features, interaction_features, velocity_features
+            comment_features, interaction_features, velocity_features, sub_genre_features
         ]).astype(np.float32)
 
         # Ensure correct dimension
@@ -512,6 +516,33 @@ class RLStateBuilder:
             content_features = np.concatenate([content_features, padding])
 
         return content_features
+
+    def _get_sub_genre_features(self, post_metadata: Dict) -> np.ndarray:
+        """
+        Get sub-genre affinity features from app-computed post_sub_genres data.
+
+        Sub-genres are finer-grained than TMDB genre labels (e.g. "Heist" under
+        Crime). This returns the top sub-genre affinities (sorted descending,
+        zero-padded to 4D) so the RL agent's state representation captures richer
+        genre signal. TMDB ToS Compliant: sub-genre data is computed from app
+        interactions/keywords in the Spring API, not copied TMDB catalog content
+        into scoring features.
+
+        Returns 4D: [top_affinity, second_affinity, third_affinity, count]
+        """
+        sub_genres = post_metadata.get('postSubGenres', [])
+        if not sub_genres:
+            return np.zeros(4, dtype=np.float32)
+
+        affinities = sorted(
+            (sg.get('affinity', 0.0) for sg in sub_genres if isinstance(sg, dict)),
+            reverse=True
+        )
+        top3 = affinities[:3]
+        padded = top3 + [0.0] * (3 - len(top3))
+        count = min(1.0, len(affinities) / 5.0)  # normalized sub-genre count
+
+        return np.array([padded[0], padded[1], padded[2], count], dtype=np.float32)
 
     def _get_comment_features(self, post_id: int, post_metadata: Dict) -> np.ndarray:
         """

@@ -78,7 +78,9 @@ class RLExperienceCollector:
             "share": 0.8,
             "skip": -0.2,
             "long_view": 0.5,  # Watched for extended time
-            "return_visit": 0.7  # Came back to same content
+            "return_visit": 0.7,  # Came back to same content
+            "watchlist_add": 0.85,
+            "watchlist_remove": -0.3
         }
         
         # In-memory buffers

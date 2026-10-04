@@ -92,6 +92,7 @@ class DiversityEnforcer:
         result = []
         remaining = list(ranked_posts)
         genre_history: List[str] = []
+        sub_genre_history: List[Tuple[int, float]] = []
 
         # Pre-allocate reserved slots
         slot_allocations = self._allocate_slots(remaining, metadata_map)
@@ -113,10 +114,13 @@ class DiversityEnforcer:
                     genres = metadata_map.get(post_id, {}).get('genreWeights', {})
                     primary = self._get_primary_genre(genres)
                     genre_history = self._update_genre_history(genre_history, primary)
+                    # Update sub-genre history
+                    sub_genres = metadata_map.get(post_id, {}).get('postSubGenres', [])
+                    sub_genre_history = self._update_sub_genre_history(sub_genre_history, sub_genres)
                     continue
 
             # Find next post respecting genre spread rules
-            candidate = self._find_diverse_candidate(remaining, metadata_map, genre_history)
+            candidate = self._find_diverse_candidate(remaining, metadata_map, genre_history, sub_genre_history)
 
             if candidate:
                 # Track if we reordered
@@ -131,6 +135,9 @@ class DiversityEnforcer:
                 genres = metadata_map.get(candidate[0], {}).get('genreWeights', {})
                 primary = self._get_primary_genre(genres)
                 genre_history = self._update_genre_history(genre_history, primary)
+                # Update sub-genre history
+                sub_genres = metadata_map.get(candidate[0], {}).get('postSubGenres', [])
+                sub_genre_history = self._update_sub_genre_history(sub_genre_history, sub_genres)
             elif remaining:
                 # Fallback: take first remaining item
                 result.append(remaining.pop(0))
@@ -295,7 +302,8 @@ class DiversityEnforcer:
 
     def _find_diverse_candidate(self, remaining: List[Tuple[int, float]],
                                 metadata_map: Dict[int, Dict],
-                                genre_history: List[str]) -> Optional[Tuple[int, float]]:
+                                genre_history: List[str],
+                                sub_genre_history: List[Tuple[int, float]] = None) -> Optional[Tuple[int, float]]:
         """
         Find next candidate that respects genre diversity rules.
 
@@ -303,10 +311,12 @@ class DiversityEnforcer:
             remaining: Remaining posts to consider
             metadata_map: Metadata dictionary
             genre_history: Recent genre history
+            sub_genre_history: Recent sub-genre (id, affinity) history
 
         Returns:
             Best candidate (post_id, score) tuple or None
         """
+        sub_genre_history = sub_genre_history or []
         if not remaining:
             return None
 
@@ -322,6 +332,13 @@ class DiversityEnforcer:
 
         blocked_genre = recent_genres[0]
 
+        # Build the set of recently-shown sub-genre ids (finer-grained than genre).
+        # A post whose sub-genre overlaps a recently shown sub-genre at high affinity
+        # is treated as repetitive and skipped, enforcing diversity at a finer level
+        # than the ~20 TMDB genre labels.
+        recent_sub_ids = {sg_id for sg_id, _ in sub_genre_history}
+        sub_genre_threshold = 0.5
+
         # Need to find a different genre
         for entry in remaining:
             post_id, score = entry
@@ -333,8 +350,42 @@ class DiversityEnforcer:
                 self.stats['genre_spread_adjustments'] += 1
                 return entry
 
+            # Same primary genre - check sub-genres for a finer-grained escape hatch.
+            # If this post's sub-genres are distinct from what was just shown, allow it.
+            if recent_sub_ids:
+                post_sub_genres = metadata.get('postSubGenres', [])
+                overlaps = [
+                    sg.get('subGenreId') for sg in post_sub_genres
+                    if sg.get('subGenreId') in recent_sub_ids and sg.get('affinity', 0.0) > sub_genre_threshold
+                ]
+                if not overlaps:
+                    self.stats['genre_spread_adjustments'] += 1
+                    return entry
+
         # Couldn't find different genre, return highest scored anyway
         return remaining[0]
+
+    def _update_sub_genre_history(self, history: List[Tuple[int, float]],
+                                  sub_genres: List[Dict]) -> List[Tuple[int, float]]:
+        """
+        Update sub-genre history with the current post's sub-genres (id, affinity).
+
+        Args:
+            history: Current sub-genre history
+            sub_genres: Post's sub-genre list from metadata (postSubGenres)
+
+        Returns:
+            Updated sub-genre history
+        """
+        if not sub_genres:
+            return history
+        entries = [
+            (sg.get('subGenreId'), sg.get('affinity', 0.0))
+            for sg in sub_genres if sg.get('subGenreId') is not None
+        ]
+        updated = history + entries
+        max_history = (self.max_consecutive_same_genre + 1) * 3
+        return updated[-max_history:]
 
     def _find_and_remove(self, posts: List[Tuple[int, float]],
                         target_id: int) -> Optional[Tuple[int, float]]:

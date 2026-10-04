@@ -258,3 +258,119 @@ def classify_overview_genres(overview: str) -> Set[str]:
             matched_ids.add(genre_id)
 
     return {GENRE_KEYWORDS[genre_id][0] for genre_id in matched_ids}
+
+
+# =============================================================================
+# Sub-genre classification
+#
+# Finer-grained labels beyond TMDB's ~20 genres (e.g. "Heist", "Romantic Comedy").
+# IDs are STABLE and MUST MATCH the Spring API's sub_genres.sub_genre_id table
+# (seeded by SubGenreSeeder) so keyword-derived and text-derived classifications
+# share one ID space and can be merged trivially at sync time.
+#
+# TMDB ToS Compliant: classification/labeling only (boolean/soft signal), never
+# fed into Two-Tower or RL scoring features directly.
+# =============================================================================
+
+SUB_GENRE_KEYWORDS: Dict[int, Tuple[str, List[str]]] = {
+    1: ("Heist", ["heist", "robbery", "bank job", "vault", "inside job", "the score", "con artist"]),
+    2: ("Psychological Thriller", ["psychological thriller", "psychological manipulation", "unreliable narrator", "paranoia", "gaslighting", "mind game", "cat and mouse"]),
+    3: ("Romantic Comedy", ["romantic comedy", "rom-com", "meet cute", "fake dating", "enemies to lovers", "friends to lovers", "love triangle"]),
+    4: ("Coming of Age", ["coming of age", "growing up", "teen drama", "first love", "high school", "adolescence", "rites of passage"]),
+    5: ("Survival", ["survival", "stranded", "deserted island", "fight to survive", "last one standing", "outlast"]),
+    6: ("Superhero", ["superhero", "superpower", "masked vigilante", "origin story", "supervillain", "comic book"]),
+    7: ("Space Opera", ["space opera", "galactic empire", "interstellar war", "star fleet", "space battle"]),
+    8: ("Whodunit", ["whodunit", "murder mystery", "suspects", "the killer", "detective story", "clue"]),
+    9: ("Period Piece", ["period piece", "costume drama", "victorian era", "regency", "medieval", "renaissance"]),
+    10: ("Dark Comedy", ["dark comedy", "black comedy", "dark humor", "gallows humor", "cringe comedy", "absurdist"]),
+    11: ("Courtroom Drama", ["courtroom drama", "trial", "jury", "lawyer", "verdict"]),
+    12: ("Zombie", ["zombie", "zombie apocalypse", "undead", "outbreak"]),
+    13: ("Time Travel", ["time travel", "time loop", "paradox"]),
+    14: ("Dystopian", ["dystopian", "dystopian future", "dystopia", "oppressive regime", "totalitarian"]),
+    15: ("True Crime", ["true crime", "serial killer", "murder investigation", "cold case", "unsolved"]),
+    16: ("Martial Arts", ["martial arts", "kung fu", "karate", "mixed martial arts", "ninja"]),
+    17: ("Found Footage", ["found footage", "documentary style", "handheld camera"]),
+    18: ("Post Apocalyptic", ["post-apocalyptic", "apocalyptic", "wasteland", "the end of the world"]),
+}
+
+
+def _build_sub_genre_index() -> Tuple[Dict[str, Set[int]], List[Tuple[frozenset, int]]]:
+    """Build a single-word lookup index and multi-word phrase list for SUB_GENRE_KEYWORDS."""
+    single_word_index: Dict[str, Set[int]] = {}
+    phrase_index: List[Tuple[frozenset, int]] = []
+
+    for sub_genre_id, (_, keywords) in SUB_GENRE_KEYWORDS.items():
+        for keyword in keywords:
+            normalized_kw = _normalize_text(keyword)
+            if not normalized_kw:
+                continue
+            words = normalized_kw.split()
+            if len(words) > 1:
+                phrase_index.append((frozenset(words), sub_genre_id))
+            else:
+                single_word_index.setdefault(words[0], set()).add(sub_genre_id)
+
+    return single_word_index, phrase_index
+
+
+_SUB_SINGLE_WORD_INDEX, _SUB_PHRASE_INDEX = _build_sub_genre_index()
+
+
+def classify_overview_sub_genres(overview: str) -> Dict[int, float]:
+    """
+    Classify a TMDB overview/synopsis string into sub-genres.
+
+    Uses the same keyword-matching pipeline as classify_overview_genres but
+    against the sub-genre dictionary. Returns a confidence score per sub-genre
+    (fraction of the sub-genre's keywords matched), keyed by the stable
+    sub_genre_id that the Spring API's post_sub_genres table uses.
+
+    Args:
+        overview: Post overview/synopsis text (TMDB-sourced).
+
+    Returns:
+        Dict mapping sub_genre_id -> confidence score (0.0-1.0). Empty if no
+        overview text or no keyword/phrase matches.
+    """
+    if not overview:
+        return {}
+
+    normalized = _normalize_text(overview)
+    if not normalized:
+        return {}
+
+    text_words = normalized.split()
+    matched_ids: Set[int] = set()
+
+    for word in text_words:
+        sub_genre_ids = _SUB_SINGLE_WORD_INDEX.get(word)
+        if sub_genre_ids:
+            matched_ids.update(sub_genre_ids)
+
+    for phrase_words, sub_genre_id in _SUB_PHRASE_INDEX:
+        if sub_genre_id not in matched_ids and _phrase_matches(text_words, phrase_words):
+            matched_ids.add(sub_genre_id)
+
+    if not matched_ids:
+        return {}
+
+    # Confidence = fraction of a sub-genre's keywords that matched (with matched
+    # multi-word phrases counting as their word count for a smoother signal).
+    scores: Dict[int, float] = {}
+    for sub_genre_id in matched_ids:
+        keywords = SUB_GENRE_KEYWORDS[sub_genre_id][1]
+        total_words = sum(len(_normalize_text(kw).split()) for kw in keywords)
+        if total_words == 0:
+            continue
+        matched_words = 0
+        for keyword in keywords:
+            kw_words = _normalize_text(keyword).split()
+            if len(kw_words) == 1:
+                if kw_words[0] in text_words:
+                    matched_words += 1
+            else:
+                if _phrase_matches(text_words, frozenset(kw_words)):
+                    matched_words += len(kw_words)
+        scores[sub_genre_id] = min(1.0, matched_words / total_words)
+
+    return scores
