@@ -1,20 +1,26 @@
+# syntax=docker/dockerfile:1
 # Social Recommendations Service Dockerfile
 FROM python:3.9-slim
 
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+ENV PYTHONPATH=/app \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # Copy service requirements
 COPY services/social-recommendations/requirements.txt .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies.
+#
+# This service has no compiled dependencies - flask, gunicorn, numpy and
+# requests all ship manylinux cp39 wheels - so no compiler toolchain is needed.
+# Removing gcc/g++/curl plus the apt layer cuts this image roughly in half.
+#
+# The cache mount keeps wheels between builds; --no-cache-dir is deliberately
+# not used, as it would defeat it.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt
 
 # Copy application code
 COPY services/social-recommendations/ ./
@@ -22,16 +28,12 @@ COPY services/social-recommendations/ ./
 # Create directories
 RUN mkdir -p /app/logs
 
-# Set environment variables
-ENV PYTHONPATH=/app
-ENV PYTHONUNBUFFERED=1
-
 # Expose port
 EXPOSE 8081
 
-# Health check
+# Health check - uses urllib from the stdlib so curl is not needed in the image
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD curl -f http://localhost:8081/health || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8081/health')" || exit 1
 
 # Run the application with Gunicorn (production WSGI server)
 CMD ["gunicorn", "--bind", "0.0.0.0:8081", "--workers", "2", "--threads", "4", "--timeout", "120", "social_recommendations_service:app"]

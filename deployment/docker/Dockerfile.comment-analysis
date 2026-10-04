@@ -1,20 +1,36 @@
+# syntax=docker/dockerfile:1
 # Comment Analysis Service Dockerfile
 FROM python:3.9-slim
 
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+ENV PYTHONPATH=/app \
+    PYTHONUNBUFFERED=1 \
+    TRANSFORMERS_CACHE=/app/models \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # Copy service requirements
 COPY services/comment-analysis/requirements.txt .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies.
+#
+# torch is installed first and pinned to the CPU-only wheel index. The
+# default PyPI wheel for torch pulls the full CUDA/cuDNN runtime stack
+# (~2GB) via nvidia-* packages, and this service only ever runs BERT on CPU
+# (it falls back to torch.device('cpu') when no GPU is present). Installing it
+# first means the `torch==2.0.1` line in requirements.txt is already satisfied
+# by 2.0.1+cpu - PEP 440 treats a local version as matching `==2.0.1` - so the
+# second install cannot pull the CUDA wheel back in. requirements.txt itself is
+# left untouched so local/dev installs keep working.
+#
+# No compiler toolchain is installed: every dependency here ships a manylinux
+# cp39 wheel. Previously gcc/g++ were added "just in case", costing ~250MB.
+#
+# The cache mount keeps wheels between builds; --no-cache-dir is deliberately
+# not used, as it would defeat it.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --index-url https://download.pytorch.org/whl/cpu torch==2.0.1 && \
+    pip install -r requirements.txt
 
 # Copy application code
 COPY services/comment-analysis/ ./
@@ -22,17 +38,12 @@ COPY services/comment-analysis/ ./
 # Create directories
 RUN mkdir -p /app/logs /app/models
 
-# Set environment variables
-ENV PYTHONPATH=/app
-ENV PYTHONUNBUFFERED=1
-ENV TRANSFORMERS_CACHE=/app/models
-
 # Expose port
 EXPOSE 8082
 
-# Health check
+# Health check - uses urllib from the stdlib so curl is not needed in the image
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:8082/health || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8082/health')" || exit 1
 
 # Run the application
 CMD ["python", "comment_analysis_service.py"]

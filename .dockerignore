@@ -1,0 +1,74 @@
+# Keep the build context small and prevent host artifacts from being baked
+# into images or busting the layer cache on every edit.
+
+# Version control
+.git
+.gitignore
+
+# Secrets (compose injects these via env_file at runtime)
+.env
+.env.*
+!.env.example
+
+# Python build/runtime artifacts
+__pycache__/
+*.legacy
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+*.egg
+
+# Virtual environments
+venv/
+env/
+.venv/
+ENV/
+
+# Test / tooling caches
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs and scratch output
+logs/
+*.log
+*.tmp
+*.temp
+*.bak
+
+# Model weights and datasets - mounted at runtime by compose, never baked in
+model_checkpoints/
+models/
+*.h5
+*.pkl
+*.pt
+*.pth
+*.onnx
+*.safetensors
+
+# Not needed to run any service
+docs/
+legacy/
+evaluation/
+scripts/
+.github/
+README.md
+*.md
+*.json

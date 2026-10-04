@@ -1,25 +1,34 @@
+# syntax=docker/dockerfile:1
 # Core Recommendations Service Dockerfile
 FROM python:3.9-slim
 
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+ENV PYTHONPATH=/app \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # Copy service requirements
 COPY services/core-recommendations/requirements.txt .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Install PyTorch from the dedicated CPU-only wheel index (RLContextualBandit
-# needs torch) - the default PyPI wheel bundles CUDA/cuDNN runtime libraries
-# that add 1.5-2GB+ for a GPU this service never uses.
-RUN pip install --no-cache-dir torch==2.1.0 --index-url https://download.pytorch.org/whl/cpu
+# Install Python dependencies.
+#
+# No compiler toolchain (gcc/g++) is installed anywhere in this image: every
+# pinned dependency ships manylinux cp39 wheels, so nothing is built from
+# source. Installing it anyway cost ~250MB per image.
+#
+# Both installs share one RUN so pip's writes land in a single layer. PyTorch
+# comes from the dedicated CPU-only wheel index (RLContextualBandit needs
+# torch) - the default PyPI wheel bundles CUDA/cuDNN runtime libraries that
+# add 1.5-2GB+ for a GPU this service never uses. The index is passed as
+# --index-url rather than --extra-index-url so pip cannot resolve back to the
+# CUDA wheel on PyPI.
+#
+# The cache mount keeps wheels between builds; --no-cache-dir is deliberately
+# not used, as it would defeat it.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt && \
+    pip install --index-url https://download.pytorch.org/whl/cpu torch==2.1.0
 
 # Copy shared components to both locations (for different import styles)
 COPY shared/components/ ./shared/components/
@@ -38,16 +47,12 @@ COPY services/core-recommendations/ ./
 # Create directories
 RUN mkdir -p /app/model_checkpoints /app/logs
 
-# Set environment variables
-ENV PYTHONPATH=/app
-ENV PYTHONUNBUFFERED=1
-
 # Expose port
 EXPOSE 5000
 
-# Health check
+# Health check - uses urllib from the stdlib so curl is not needed in the image
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD curl -f http://localhost:5000/health || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')" || exit 1
 
 # Run the application with Gunicorn (production WSGI server)
 CMD ["gunicorn", "--config", "gunicorn.conf.py", "core_recommendations_service:app"]
