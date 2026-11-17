@@ -9,14 +9,14 @@ signal (genre, cast/crew, potentially more later), so this tracks each category
 under its own Redis key rather than being hardcoded to one dimension like genre.
 
 Currently used signal_type values:
-- "genre": TMDB genre names classified from overview text (GenreTextClassifier)
+- "genre": TMDB genre names from post metadata (post_genres table)
 - "person": TMDB cast/crew person IDs (exact ID matching, no text mining)
 
 TMDB ToS Compliant: signal values are derived from TMDB data (overview text,
 cast/crew IDs), but what's stored and applied here is a behavioral interaction
 count used as a graduated score multiplier - the same category of signal as the
 existing behavioral engagement boost in MetadataEnhancer, not a TMDB feature fed
-into Two-Tower/RL scoring or training.
+into ML/RL scoring or training.
 """
 
 import json

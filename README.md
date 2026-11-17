@@ -27,7 +27,7 @@ RecommendationMLModel/
 │       └── requirements.txt
 ├── shared/                            # Shared components
 │   ├── components/                    # Reusable components
-│   │   ├── TwoTower.py               # Two-Tower ML model
+│   │   ├── VectorScorer.py            # NumPy cosine similarity scoring
 │   │   ├── MetadataEnhancer.py       # Metadata enhancement
 │   │   ├── MockRedis.py              # Redis mock for testing
 │   │   ├── ContentFilter.py          # Content filtering
@@ -56,7 +56,6 @@ RecommendationMLModel/
 │   ├── ReccommendationEngine.py      # Original recommendation engine
 │   ├── OffsetTracking.py             # Offset tracking
 │   └── SeenCache.py                  # Seen content cache
-├── model_checkpoints/                 # ML model files
 ├── logs/                              # Service logs
 ├── .env.microservices                # Environment configuration
 └── README.md                         # This file
@@ -256,9 +255,7 @@ MAX_FOLLOWING_USERS=50
 
 # ML Model
 USER_FEATURE_DIM=64
-POST_FEATURE_DIM=64
 EMBEDDING_DIM=32
-MODEL_DIR=./model_checkpoints
 
 # Cache Configuration
 REDIS_HOST=localhost

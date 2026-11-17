@@ -22,7 +22,7 @@ import requests
 from dotenv import load_dotenv
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "shared", "components"))
-from TwoTower import compute_scores  # noqa: E402
+from VectorScorer import compute_scores  # noqa: E402
 from MockRedis import MockRedis  # noqa: E402
 from MetadataEnhancer import MetadataEnhancer  # noqa: E402
 from ContentFilter import ContentFilter  # noqa: E402
@@ -31,9 +31,6 @@ from evaluation.spring_client import SpringMLClient  # noqa: E402
 
 DEGENERATE_SCORE_STD_THRESHOLD = 0.02
 
-# Model checkpoint files as loaded by services/core-recommendations/core_recommendations_service.py
-SERVICE_DIR = os.path.join(os.path.dirname(__file__), "..", "services", "core-recommendations")
-
 
 @dataclass
 class CheckResult:
@@ -41,34 +38,6 @@ class CheckResult:
     status: str  # "PASS" | "WARN" | "FAIL"
     detail: str
     data: Dict[str, Any] = field(default_factory=dict)
-
-
-def check_model_checkpoint() -> CheckResult:
-    model_dir = os.environ.get("MODEL_DIR", "./model_checkpoints")
-    user_model = os.environ.get("USER_MODEL", "user_tower_latest.h5")
-    post_model = os.environ.get("POST_MODEL", "post_tower_latest.h5")
-
-    candidate_dirs = [
-        os.path.join(SERVICE_DIR, model_dir.lstrip("./")),
-        os.path.join(os.path.dirname(__file__), "..", model_dir.lstrip("./")),
-    ]
-    for d in candidate_dirs:
-        user_path = os.path.join(d, user_model)
-        post_path = os.path.join(d, post_model)
-        if os.path.exists(user_path) and os.path.exists(post_path):
-            return CheckResult(
-                "model_checkpoint", "PASS",
-                f"Found trained checkpoints at {os.path.abspath(d)}",
-                {"user_model": user_path, "post_model": post_path},
-            )
-
-    checked = ", ".join(os.path.abspath(d) for d in candidate_dirs)
-    return CheckResult(
-        "model_checkpoint", "FAIL",
-        f"No trained model checkpoint found (checked: {checked}). The service falls back to a "
-        "RANDOMLY-INITIALIZED, never-trained Two-Tower model - every score it produces is noise, "
-        "not a learned preference. This alone explains near-chance ranking accuracy.",
-    )
 
 
 def check_spring_connectivity(client: SpringMLClient) -> CheckResult:
@@ -116,7 +85,7 @@ def check_redis() -> CheckResult:
         return CheckResult("redis_connectivity", "FAIL", f"Round-trip failed: {e} ({note})")
 
 
-def check_two_tower_scoring(client: SpringMLClient, user_ids: List, content_type: str = "POSTS") -> CheckResult:
+def check_vector_scoring(client: SpringMLClient, user_ids: List, content_type: str = "POSTS") -> CheckResult:
     per_user_top = {}
     all_scores = []
     problems = []
@@ -142,7 +111,7 @@ def check_two_tower_scoring(client: SpringMLClient, user_ids: List, content_type
         per_user_top[uid] = [pid for pid, _ in top]
 
     if not all_scores:
-        return CheckResult("two_tower_scoring", "FAIL", "Could not score any users - no data returned", {})
+        return CheckResult("vector_scoring", "FAIL", "Could not score any users - no data returned", {})
 
     score_std = float(np.std(all_scores))
     score_mean = float(np.mean(all_scores))
@@ -155,23 +124,23 @@ def check_two_tower_scoring(client: SpringMLClient, user_ids: List, content_type
     data = {"score_mean": score_mean, "score_std": score_std, "per_user_top5": per_user_top}
 
     if problems:
-        return CheckResult("two_tower_scoring", "FAIL", "; ".join(problems), data)
+        return CheckResult("vector_scoring", "FAIL", "; ".join(problems), data)
     if score_std < DEGENERATE_SCORE_STD_THRESHOLD:
         return CheckResult(
-            "two_tower_scoring", "WARN",
-            f"Score std ({score_std:.4f}) is near zero across {len(all_scores)} scores - the model is "
-            "barely distinguishing between candidates (consistent with an untrained model).",
+            "vector_scoring", "WARN",
+            f"Score std ({score_std:.4f}) is near zero across {len(all_scores)} scores - vectors are "
+            "barely distinguishing between candidates.",
             data,
         )
     if identical_top5_across_users:
         return CheckResult(
-            "two_tower_scoring", "WARN",
+            "vector_scoring", "WARN",
             f"Top-5 ranking is IDENTICAL across all {len(users_with_data)} sampled users - scores may not "
             "actually depend on the user vector.",
             data,
         )
     return CheckResult(
-        "two_tower_scoring", "PASS",
+        "vector_scoring", "PASS",
         f"Scored {len(all_scores)} candidates across {len(users_with_data)} users, "
         f"mean={score_mean:.4f} std={score_std:.4f}, all in [0,1], per-user rankings differ.",
         data,
@@ -292,11 +261,10 @@ def run_health_check(user_ids: List, api_url: Optional[str] = None, live_url: Op
     probe_user = user_ids[0]
 
     results = [
-        check_model_checkpoint(),
         check_spring_connectivity(client),
         check_spring_auth(client, probe_user),
         check_redis(),
-        check_two_tower_scoring(client, user_ids, content_type=content_type),
+        check_vector_scoring(client, user_ids, content_type=content_type),
         check_metadata_enhancer(client, probe_user, content_type=content_type.lower()),
         check_content_filter(client, probe_user, content_type=content_type),
     ]

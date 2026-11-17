@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Offline accuracy evaluation for the Two-Tower recommendation model against
+Offline accuracy evaluation for the vector similarity recommendation model against
 real historical interaction data.
 
 For each user: pull their real interaction history (likes/saves/not-interested,
-with timestamps) from the Spring API, fetch the Two-Tower vectors for those
+with timestamps) from the Spring API, fetch the model vectors for those
 specific posts plus a pool of real unseen candidates as distractors, score
-everything the same way core_recommendations_service.py does (TwoTower.compute_scores
+everything the same way core_recommendations_service.py does (VectorScorer.compute_scores
 on raw vectors), rank, and measure how well the ranking recovers the posts the
 user actually liked/saved vs. ones they ignored or explicitly rejected.
 
-This measures the RAW Two-Tower model only (no metadata enhancer / RL / content
+This measures the RAW vector cosine model only (no metadata enhancer / RL / content
 filter / diversity reranking on top) - i.e. "is the core embedding model any good
 at telling what this user likes from what they don't". Use health_check.py to
 check the rest of the pipeline.
@@ -32,7 +32,7 @@ import numpy as np
 from dotenv import load_dotenv
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "shared", "components"))
-from TwoTower import compute_scores  # noqa: E402
+from VectorScorer import compute_scores  # noqa: E402
 
 from evaluation.spring_client import SpringMLClient  # noqa: E402
 from evaluation.metrics import (  # noqa: E402

@@ -14,7 +14,9 @@ Features:
 import logging
 from typing import Dict, List, Optional, Set
 
-from GenreTextClassifier import classify_overview_genres
+def _get_post_genre_names(post_meta: Dict) -> set:
+    """Get genre names from post metadata (replaces text classification)."""
+    return set(post_meta.get('genres', []))
 
 logger = logging.getLogger("eligibility-filter")
 
@@ -353,7 +355,7 @@ class EligibilityFilter:
             return True
 
         avoid_genres_lower = {g.lower() for g in avoid_genres}
-        classified_genres = classify_overview_genres(overview)
+        classified_genres = _get_post_genre_names(post_meta)
         return not any(g.lower() in avoid_genres_lower for g in classified_genres)
 
     def _check_avoid_sub_genres(self, post_meta: Dict, user_meta: Dict) -> bool:
@@ -419,10 +421,9 @@ class EligibilityFilter:
 
         if not self._check_avoid_genres(post_metadata, user_metadata):
             avoid_genres = user_metadata.get('avoidGenres', [])
-            overview = post_metadata.get('overview', '')
-            classified = classify_overview_genres(overview)
-            reasons.append(f"Avoid-genre match via overview: user_avoids={avoid_genres}, "
-                          f"overview_classified_as={sorted(classified)}")
+            classified = _get_post_genre_names(post_metadata)
+            reasons.append(f"Avoid-genre match: user_avoids={avoid_genres}, "
+                          f"post_genres={sorted(classified)}")
 
         if not self._check_avoid_sub_genres(post_metadata, user_metadata):
             avoid_sub_genres = user_metadata.get('avoidSubGenres', [])

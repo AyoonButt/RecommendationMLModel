@@ -1,8 +1,8 @@
-# Technical Specification: Enhanced Two-Tower Recommendation System
+# Technical Specification: Enhanced Recommendation System
 
 ## 1. System Overview
 
-The recommendation system utilizes an enhanced Two-Tower neural network architecture with comprehensive social analysis and content filtering capabilities. The system has evolved from basic personalized recommendations to include:
+The recommendation system utilizes vector similarity scoring (cosine distance) with comprehensive social analysis and content filtering capabilities. The system has evolved from basic personalized recommendations to include:
 
 - **Social Signal Processing**: Leveraging followed user vectors and social influence
 - **Sentiment Analysis**: BERT-based comment sentiment analysis 
@@ -40,7 +40,7 @@ New social data structures:
 - **social_embeddings**: Followed user influence vectors
 - **interaction_weights**: Configurable weights including social and sentiment factors
 
-## 3. Enhanced Two-Tower Model Architecture
+## 3. Vector Scoring Architecture
 
 ### 3.1 Enhanced User Tower
 
@@ -216,7 +216,7 @@ Multiple scoring functions available:
 **Implemented Components:**
 - Python ML model integration
 - Social signal processor
-- Enhanced TwoTower model with social scoring
+- Vector cosine scoring with social signals
 - Dual preference boosting algorithms
 - Updated recommendation engine API
 
@@ -334,9 +334,7 @@ Multiple scoring functions available:
 
 **ML Model Settings:**
 - `USER_FEATURE_DIM` - User feature vector dimension (default: 64)
-- `POST_FEATURE_DIM` - Post feature vector dimension (default: 64)
 - `EMBEDDING_DIM` - Final embedding dimension (default: 32)
-- `HIDDEN_DIMS` - Neural network layer sizes (default: 128,64)
 
 ## 10. Security and Safety
 

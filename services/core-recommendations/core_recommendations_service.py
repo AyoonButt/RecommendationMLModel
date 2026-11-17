@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Core Recommendations Service
-Pure ML recommendations using Two-Tower model with inter-service communication
+Pure ML recommendations using vector similarity scoring with inter-service communication
 Port: 5000
 """
 
@@ -20,7 +20,7 @@ import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../shared/components'))
 
-from TwoTower import TwoTowerModel, compute_scores
+from VectorScorer import compute_scores
 from MockRedis import MockRedis
 from CandidatePoolCache import CandidatePoolCache
 
@@ -399,10 +399,6 @@ class CoreRecommendationsService:
                 self.metadata_enhancer.set_jwt_token(self.current_jwt_token)
             logger.info("Updated all service clients and metadata enhancer with token from API")
 
-        # Initialize Two-Tower model
-        self.two_tower_model = None
-        self._load_model()
-
         # Initialize Recommendation Explainer (shares metadata cache with enhancer)
         self.explainer = create_explainer(
             api_base_url=self.api_base_url,
@@ -469,33 +465,6 @@ class CoreRecommendationsService:
                 if hasattr(self.metadata_enhancer, 'set_jwt_token'):
                     self.metadata_enhancer.set_jwt_token(fallback_token)
 
-    def _load_model(self):
-        """Load the TwoTower model"""
-        try:
-            logger.info("Loading TwoTower model...")
-
-            model_dir = os.environ.get('MODEL_DIR', './model_checkpoints')
-            user_model_path = os.path.join(model_dir, os.environ.get('USER_MODEL', 'user_tower_latest.h5'))
-            post_model_path = os.path.join(model_dir, os.environ.get('POST_MODEL', 'post_tower_latest.h5'))
-
-            self.two_tower_model = TwoTowerModel(
-                user_feature_dim=int(os.environ.get('USER_FEATURE_DIM', '64')),
-                post_feature_dim=int(os.environ.get('POST_FEATURE_DIM', '64')),
-                embedding_dim=int(os.environ.get('EMBEDDING_DIM', '32')),
-                hidden_dims=[int(dim) for dim in os.environ.get('HIDDEN_DIMS', '128,64').split(',')]
-            )
-
-            if os.path.exists(user_model_path) and os.path.exists(post_model_path):
-                self.two_tower_model.load_models(user_model_path, post_model_path)
-                logger.info(f"Loaded pre-trained models from {user_model_path} and {post_model_path}")
-            else:
-                logger.warning("Pre-trained models not found, using initialized model")
-
-            logger.info("TwoTower model loaded successfully")
-        except Exception as e:
-            logger.error(f"Error loading model: {e}")
-            self.two_tower_model = None
-
     def get_recommendations(self, request_data: Dict[str, Any], jwt_token: str = None) -> Dict[str, Any]:
         """
         Process a recommendation request and return recommended posts
@@ -561,7 +530,7 @@ class CoreRecommendationsService:
 
     def get_post_recommendations(self, user_id: str, limit: int = 20,
                                   jwt_token: str = None, include_explanations: bool = True) -> Dict[str, Any]:
-        """Get post recommendations using the Two-Tower model"""
+        """Get post recommendations using the vector similarity scoring"""
         try:
             # Update JWT token for this request
             self._update_jwt_token(jwt_token)
@@ -638,7 +607,7 @@ class CoreRecommendationsService:
             logger.info(f"Fetched {candidate_count} candidates successfully")
             logger.info(f"Candidate distribution: {candidate_data.get('distribution', {})}")
 
-            # Score candidates using Two-Tower model with metadata enhancement
+            # Score candidates using vector similarity scoring with metadata enhancement
             scoring_result = self._score_candidates(
                 user_id=user_id,
                 user_vector=user_vector,
@@ -698,7 +667,7 @@ class CoreRecommendationsService:
 
     def get_trailer_recommendations(self, user_id: str, limit: int = 20,
                                     jwt_token: str = None, include_explanations: bool = True) -> Dict[str, Any]:
-        """Get trailer recommendations using the Two-Tower model"""
+        """Get trailer recommendations using the vector similarity scoring"""
         try:
             # Update JWT token for this request
             self._update_jwt_token(jwt_token)
@@ -774,7 +743,7 @@ class CoreRecommendationsService:
             logger.info(f"Fetched {candidate_count} trailer candidates successfully")
             logger.info(f"Candidate distribution: {candidate_data.get('distribution', {})}")
 
-            # Score candidates using Two-Tower model with metadata enhancement
+            # Score candidates using vector similarity scoring with metadata enhancement
             scoring_result = self._score_candidates(
                 user_id=user_id,
                 user_vector=user_vector,
@@ -1153,9 +1122,9 @@ class CoreRecommendationsService:
             logger.error(f"Unexpected error retrieving user vector from API: {e}", exc_info=True)
 
         # Return default vector if can't retrieve
-        logger.warning(f"Using default (random) vector for user {user_id} - API fetch failed")
+        logger.warning(f"Using default (zero) vector for user {user_id} - API fetch failed")
         feature_dim = int(os.environ.get('USER_FEATURE_DIM', '64'))
-        default_vector = np.random.rand(feature_dim).astype(np.float32)
+        default_vector = np.zeros(feature_dim, dtype=np.float32)
         logger.info(f"Generated default vector with dimension {feature_dim} for user {user_id}")
 
         # Cache default vector
@@ -1169,10 +1138,10 @@ class CoreRecommendationsService:
     def _score_candidates(self, user_id: str, user_vector: np.ndarray,
                           candidate_data: Dict[str, Any], content_type: str) -> Dict[str, Any]:
         """
-        Score candidate posts using the Two-Tower model with metadata enhancement.
+        Score candidate posts using the vector similarity scoring with metadata enhancement.
 
         TMDB ToS Compliant Pipeline:
-        1. Two-Tower ML scoring (behavioral embeddings)
+        1. vector cosine ML scoring (behavioral embeddings)
         2. Eligibility filtering (TMDB boolean pass/fail)
         3. Behavioral boost (app engagement data only)
         4. Diversity reranking (TMDB genre for ordering only)
@@ -1200,18 +1169,6 @@ class CoreRecommendationsService:
             "diversity_applied": False
         }
 
-        if not self.two_tower_model:
-            logger.warning("TwoTower model not available, using fallback scoring")
-            logger.warning(f"Fallback: Assigning random scores to {len(candidate_data.get('vectors', {}))} candidates")
-            post_ids = list(candidate_data["vectors"].keys())
-            for post_id in post_ids:
-                score = float(np.random.random())
-                result["base_scores"][post_id] = score
-                result["enhanced_scores"][post_id] = score
-            result["scored_posts"] = [(pid, result["enhanced_scores"][pid]) for pid in post_ids]
-            logger.info(f"Fallback scoring complete: {len(result['scored_posts'])} candidates scored")
-            return result
-
         try:
             vectors = candidate_data["vectors"]
             candidates = candidate_data.get("candidates", [])
@@ -1225,7 +1182,7 @@ class CoreRecommendationsService:
             post_ids = list(vectors.keys())
             post_vectors = list(vectors.values())
             post_vectors_array = np.array(post_vectors)
-            logger.info(f"Prepared {len(post_ids)} candidates for Two-Tower scoring")
+            logger.info(f"Prepared {len(post_ids)} candidates for vector cosine scoring")
             logger.debug(f"Candidate post IDs: {post_ids[:10]}{'...' if len(post_ids) > 10 else ''}")
             logger.debug(f"Post vectors array shape: {post_vectors_array.shape}")
 
@@ -1233,10 +1190,10 @@ class CoreRecommendationsService:
             user_batch = np.expand_dims(user_vector, axis=0)
             logger.debug(f"User batch shape: {user_batch.shape}")
 
-            # Calculate base scores using Two-Tower model
-            logger.info(f"Computing Two-Tower base scores for {len(post_ids)} candidates...")
+            # Calculate base scores using vector similarity scoring
+            logger.info(f"Computing vector cosine base scores for {len(post_ids)} candidates...")
             base_scores_array = compute_scores(user_batch, post_vectors_array, content_type)
-            logger.info(f"Two-Tower scoring complete. Score range: [{base_scores_array.min():.4f}, {base_scores_array.max():.4f}]")
+            logger.info(f"vector cosine scoring complete. Score range: [{base_scores_array.min():.4f}, {base_scores_array.max():.4f}]")
             logger.info(f"Mean base score: {base_scores_array.mean():.4f}, Std: {base_scores_array.std():.4f}")
 
             # Store base scores
@@ -1321,15 +1278,14 @@ class CoreRecommendationsService:
             logger.error(f"=== CANDIDATE SCORING FAILED for user {user_id} ===")
             logger.error(f"Error scoring candidates: {e}", exc_info=True)
             logger.error(f"Failure context - Content type: {content_type}, Candidate count: {len(candidate_data.get('vectors', {}))}")
-            # Fallback to random scores
+            # Fallback to deterministic zero scores
             post_ids = list(candidate_data["vectors"].keys())
-            logger.warning(f"Fallback: Assigning random scores to {len(post_ids)} candidates after scoring failure")
+            logger.warning(f"Fallback: Assigning zero scores to {len(post_ids)} candidates after scoring failure")
             for post_id in post_ids:
-                score = float(np.random.random())
-                result["base_scores"][post_id] = score
-                result["enhanced_scores"][post_id] = score
+                result["base_scores"][post_id] = 0.0
+                result["enhanced_scores"][post_id] = 0.0
             result["scored_posts"] = [(pid, result["enhanced_scores"][pid]) for pid in post_ids]
-            logger.info(f"Fallback scoring complete: {len(result['scored_posts'])} candidates scored with random values")
+            logger.info(f"Fallback scoring complete: {len(result['scored_posts'])} candidates scored with zero values")
             return result
 
     def _generate_explanations(self, user_id: str, post_ids: List[int],
@@ -1535,7 +1491,7 @@ class CoreRecommendationsService:
                 cursors_tracked_count = len(self.cursor_tracker)
 
             base_stats = {
-                "modelLoaded": self.two_tower_model is not None,
+                "modelLoaded": True,
                 "cacheStatus": {
                     "redisConnected": self.redis_client.ping()
                 },
@@ -1837,7 +1793,7 @@ def root():
             "stats": "/stats"
         },
         "features": {
-            "two_tower_model": "User-Post embedding similarity scoring",
+            "vector_cosine_scoring": "User-Post embedding similarity scoring",
             "metadata_enhancement": "Language, genre, cast/crew, recency boosting",
             "rl_enhancement": "Adaptive boost factors based on user interactions" if rl_status["active"] else "Disabled",
             "social_enhancement": "Optional social signal boosting via social service"

@@ -154,9 +154,7 @@ LOCAL_DEV=true
 
 # ML Model Configuration
 USER_FEATURE_DIM=64
-POST_FEATURE_DIM=64
 EMBEDDING_DIM=32
-MODEL_DIR=./model_checkpoints
 
 # RL Configuration (NEW)
 RL_COMMENT_INTEGRATION_ENABLED=true

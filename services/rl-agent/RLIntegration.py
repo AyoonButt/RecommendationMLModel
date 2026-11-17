@@ -208,7 +208,9 @@ class RLIntegrationManager:
                 metadata={
                     'state_dim': len(state.state_vector),
                     'action_type': action.action_type,
-                    'rl_enabled': True
+                    'rl_enabled': True,
+                    'propensity': action.parameters.get('propensity', 0.0),
+                    'num_candidates': action.parameters.get('num_candidates', 0)
                 },
                 processing_time=processing_time
             )

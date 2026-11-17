@@ -11,7 +11,7 @@ logger = logging.getLogger("rl-state-representation")
 @dataclass
 class RLState:
     """Comprehensive state representation for RL agent."""
-    # Core embeddings (from existing Two-Tower system)
+    # Core embeddings (from vector scoring system)
     user_embedding: np.ndarray  # 32D user embedding
     post_embedding: np.ndarray  # 32D post embedding
     
@@ -62,7 +62,7 @@ class RLState:
 class RLStateBuilder:
     """
     Builds comprehensive state representations for RL agent.
-    Integrates with existing Two-Tower embeddings and adds temporal/contextual features.
+    Integrates with existing vector embeddings and adds temporal/contextual features.
     """
     
     def __init__(self, user_embedding_dim: int = 32, post_embedding_dim: int = 32,
@@ -121,7 +121,7 @@ class RLStateBuilder:
         Returns:
             RLState object with all features
         """
-        # Get core embeddings (from existing Two-Tower system)
+        # Get core embeddings (from vector scoring system)
         user_embedding = self._get_user_embedding(user_id, context)
         post_embedding = self._get_post_embedding(post_id, context)
         
@@ -166,9 +166,20 @@ class RLStateBuilder:
             content_features,
             social_signals,
             interaction_history_vector,
-            comment_analysis_features,  # New comment analysis features
+            comment_analysis_features,
             [user_satisfaction_score, user_exploration_tendency, content_appeal_score]
         ])
+
+        # Shape assertion: catch dimension mismatches before they silently
+        # corrupt the RL network (e.g. 64-dim VectorService vectors passed
+        # where the config expects 32).
+        if state_vector.shape[0] != self.state_dim:
+            raise ValueError(
+                f"RL state dimension mismatch: got {state_vector.shape[0]}, "
+                f"expected {self.state_dim}. "
+                f"user_embedding={user_embedding.shape[0]}, "
+                f"post_embedding={post_embedding.shape[0]}"
+            )
         
         # Normalize state vector
         state_vector = self._normalize_state_vector(state_vector)
@@ -191,7 +202,7 @@ class RLStateBuilder:
         )
     
     def _get_user_embedding(self, user_id: int, context: Dict[str, Any]) -> np.ndarray:
-        """Get user embedding from existing Two-Tower system."""
+        """Get user embedding from vector scoring system."""
         # This would integrate with your existing user embedding system
         user_embedding = context.get('user_embedding')
         if user_embedding is not None:
@@ -202,7 +213,7 @@ class RLStateBuilder:
         return np.random.normal(0, 0.1, self.user_embedding_dim).astype(np.float32)
     
     def _get_post_embedding(self, post_id: int, context: Dict[str, Any]) -> np.ndarray:
-        """Get post embedding from existing Two-Tower system."""
+        """Get post embedding from vector scoring system."""
         # This would integrate with your existing post embedding system
         post_embedding = context.get('post_embedding')
         if post_embedding is not None:

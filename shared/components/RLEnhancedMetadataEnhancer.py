@@ -23,7 +23,9 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '../../services/rl-agent
 
 from MetadataEnhancer import MetadataEnhancer, create_diversity_enforcer, extract_person_ids
 from RLIntegration import RLIntegrationManager, create_rl_integration_manager
-from GenreTextClassifier import classify_overview_genres
+def _get_post_genre_names(post_meta: Dict) -> set:
+    """Get genre names from post metadata (replaces text classification)."""
+    return set(post_meta.get('genres', []))
 
 logger = logging.getLogger("rl-enhanced-metadata-enhancer")
 
@@ -204,7 +206,7 @@ class RLEnhancedMetadataEnhancer(MetadataEnhancer):
 
             overview = post_metadata.get('overview', '')
             if overview:
-                classified_genres = classify_overview_genres(overview)
+                classified_genres = _get_post_genre_names(post_metadata)
                 if classified_genres:
                     self.avoided_signal_tracker.record(user_id, 'genre', list(classified_genres))
                     logger.debug(f"Recorded not_interested genres for user {user_id}, "

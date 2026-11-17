@@ -11,7 +11,9 @@ import numpy as np
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
 
-from GenreTextClassifier import classify_overview_genres
+def _get_post_genre_names(post_meta: Dict) -> set:
+    """Get genre names from post metadata (replaces text classification)."""
+    return set(post_meta.get('genres', []))
 from MetadataEnhancer import extract_person_ids
 
 logger = logging.getLogger("recommendation-explainer")
@@ -142,7 +144,7 @@ class RecommendationExplainer:
         Args:
             user_id: The user receiving recommendations
             post_ids: List of recommended post IDs (in ranked order)
-            base_scores: Base scores from Two-Tower model
+            base_scores: Base scores from vector cosine scoring
             final_scores: Final scores after all enhancements
             user_metadata: User preferences and profile data
             post_metadata_map: Metadata for each post {post_id: metadata}
@@ -202,21 +204,21 @@ class RecommendationExplainer:
                 factor="ml_similarity",
                 weight=base_score,
                 description="Strong match based on your viewing history",
-                details={"model": "two_tower", "similarity": base_score}
+                details={"model": "vector_cosine", "similarity": base_score}
             )
         elif base_score > 0.5:
             explanation.add_reason(
                 factor="ml_similarity",
                 weight=base_score,
                 description="Good match for your preferences",
-                details={"model": "two_tower", "similarity": base_score}
+                details={"model": "vector_cosine", "similarity": base_score}
             )
         else:
             explanation.add_reason(
                 factor="ml_similarity",
                 weight=base_score,
                 description="Potential new interest for you",
-                details={"model": "two_tower", "similarity": base_score}
+                details={"model": "vector_cosine", "similarity": base_score}
             )
 
     def _analyze_language_match(self, explanation: PostExplanation,
@@ -338,7 +340,7 @@ class RecommendationExplainer:
         if not overview:
             return
 
-        classified_genres = classify_overview_genres(overview)
+        classified_genres = _get_post_genre_names(post_metadata)
         matched = {g: avoided_genre_counts[g] for g in classified_genres if g in avoided_genre_counts}
         if not matched:
             return

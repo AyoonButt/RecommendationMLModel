@@ -9,7 +9,7 @@ TMDB data is used for:
 ML features come ONLY from user behavior within the app (clicks, likes, saves, etc.).
 
 Architecture:
-    Two-Tower ML → EligibilityFilter → BehavioralBoost → DiversityEnforcer → Final
+    Vector cosine scoring → EligibilityFilter → BehavioralBoost → DiversityEnforcer → Final
                        ↑                                        ↑
                   TMDB (boolean)                           TMDB (reorder only)
 """
@@ -28,7 +28,9 @@ _meta_executor = ThreadPoolExecutor(max_workers=4)
 
 from EligibilityFilter import EligibilityFilter, create_eligibility_filter
 from DiversityEnforcer import DiversityEnforcer, create_diversity_enforcer
-from GenreTextClassifier import classify_overview_genres
+def _get_post_genre_names(post_meta: Dict) -> set:
+    """Get genre names from post metadata (replaces text classification)."""
+    return set(post_meta.get('genres', []))
 from AvoidedSignalTracker import AvoidedSignalTracker
 
 
@@ -242,7 +244,7 @@ class MetadataEnhancer:
                 # Step 1: Eligibility filter (boolean - TMDB data)
                 if post_metadata and user_metadata:
                     if not self.eligibility_filter.check_eligibility(post_metadata, user_metadata):
-                        enhanced_scores[i] = 0.0  # Filter out
+                        enhanced_scores[i] = -1.0  # Hard filter — rank below all non-filtered
                         continue
 
                     # Step 2: Behavioral genre soft filter (penalize but don't reject)
@@ -276,6 +278,13 @@ class MetadataEnhancer:
                         enhanced_scores[i], post_metadata, int(post_id)
                     )
 
+                # Step 3a: Soft date/runtime range penalty (derived from swipes,
+                # applied as a graduated penalty, NOT a hard filter)
+                if post_metadata and user_metadata:
+                    enhanced_scores[i] *= self._calculate_range_penalty(
+                        post_metadata, user_metadata
+                    )
+
                 # Step 3b: Resurfaced-favorite discount (liked/saved a long time ago,
                 # let back into the candidate pool by the rare-resurface gate)
                 candidate_meta = candidates_by_id.get(int(post_id)) or candidates_by_id.get(post_id)
@@ -286,8 +295,14 @@ class MetadataEnhancer:
                     if is_resurfaced:
                         enhanced_scores[i] *= self.resurfaced_favorite_discount
 
-            # Ensure scores stay in valid range [0, 1]
-            enhanced_scores = np.clip(enhanced_scores, 0.0, 1.0)
+            # Cap heuristic influence: blend 60% cosine / 40% heuristics so
+            # multiplicative boosts cannot overwhelm the base similarity signal.
+            # See docs/IDEAL_VECTOR_SETUP_PLAN.md Part 3.
+            HEURISTIC_WEIGHT = 0.4
+            enhanced_scores = (1.0 - HEURISTIC_WEIGHT) * base_scores + HEURISTIC_WEIGHT * enhanced_scores
+
+            # Keep raw-cosine range
+            enhanced_scores = np.clip(enhanced_scores, -1.0, 1.0)
 
             return enhanced_scores
 
@@ -380,6 +395,52 @@ class MetadataEnhancer:
         penalty = 1.0 - (self.avoided_signal_penalty_per_count * worst_count)
         return max(self.avoided_signal_min_penalty_factor, penalty)
 
+    def _calculate_range_penalty(self, post_metadata: Dict, user_metadata: Dict) -> float:
+        """
+        Soft penalty for content outside the user's derived date/runtime range.
+        The range is derived from swipes (10th/90th percentile of swiped content),
+        so it's a noisy estimate — penalize, don't exclude.
+        """
+        penalty = 1.0
+
+        # Date range penalty (10-year tolerance before saturating)
+        release_year = post_metadata.get('releaseYear')
+        if release_year is not None:
+            try:
+                year = int(release_year)
+                user_recent = user_metadata.get('recentDate', '')
+                user_oldest = user_metadata.get('oldestDate', '')
+                if user_recent and len(user_recent) >= 4:
+                    max_year = int(user_recent[:4])
+                    if year > max_year:
+                        distance = min(year - max_year, 10)
+                        penalty *= 1.0 - 0.2 * (distance / 10.0)
+                if user_oldest and len(user_oldest) >= 4:
+                    min_year = int(user_oldest[:4])
+                    if year < min_year:
+                        distance = min(min_year - year, 10)
+                        penalty *= 1.0 - 0.2 * (distance / 10.0)
+            except (ValueError, TypeError):
+                pass
+
+        # Runtime range penalty (30-minute tolerance before saturating)
+        runtime = post_metadata.get('runtime')
+        if runtime is not None:
+            try:
+                rt = int(runtime)
+                user_max = user_metadata.get('maxMovie', 0) or user_metadata.get('maxTV', 0)
+                user_min = user_metadata.get('minMovie', 0) or user_metadata.get('minTV', 0)
+                if user_max and rt > user_max:
+                    distance = min(rt - user_max, 30)
+                    penalty *= 1.0 - 0.15 * (distance / 30.0)
+                if user_min and rt < user_min:
+                    distance = min(user_min - rt, 30)
+                    penalty *= 1.0 - 0.15 * (distance / 30.0)
+            except (ValueError, TypeError):
+                pass
+
+        return max(0.5, penalty)  # Never reduce below 50%
+
     def _calculate_avoided_genre_penalty(self, post_metadata: Dict,
                                          avoided_genre_counts: Dict[str, int]) -> float:
         """
@@ -401,7 +462,7 @@ class MetadataEnhancer:
             if not overview:
                 return 1.0
 
-            classified_genres = classify_overview_genres(overview)
+            classified_genres = _get_post_genre_names(post_metadata)
             matched_counts = [
                 avoided_genre_counts[g] for g in classified_genres if g in avoided_genre_counts
             ]

@@ -47,9 +47,7 @@ COMMENT_SERVICE_URL=http://localhost:8080
 REDIS_HOST=localhost
 REDIS_PORT=6379
 USER_FEATURE_DIM=64
-POST_FEATURE_DIM=64
 EMBEDDING_DIM=32
-MODEL_DIR=./model_checkpoints
 ```
 
 ### 2. Comment Analysis Service (Port 8080)
@@ -466,7 +464,7 @@ curl -X POST http://localhost:5000/recommendations \
 
 ### Service Dependencies
 
-- **Core Service**: TwoTower, MetadataEnhancer, MockRedis
+- **Core Service**: VectorScorer, MetadataEnhancer, MockRedis
 - **Comment Service**: Transformers, torch, flask
 - **Social Service**: numpy, requests, flask
 

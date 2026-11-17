@@ -13,7 +13,7 @@ from ContentFilter import create_content_filter
 from MetadataEnhancer import MetadataEnhancer
 from MockRedis import MockRedis
 from SocialSignalProcessor import create_social_signal_processor
-from TwoTower import TwoTowerModel, compute_scores, compute_socially_enhanced_scores, compute_dual_preference_scores, \
+from VectorScorer import compute_scores, compute_socially_enhanced_scores, compute_dual_preference_scores, \
     compute_filtered_scores
 
 # Configure logging
@@ -46,10 +46,10 @@ def _error_response(message: str) -> Dict:
 
 
 class MLRecommendationService:
-    """Service that receives recommendation requests and returns results using TwoTower model."""
+    """Service that receives recommendation requests and returns results using vector cosine scoring."""
 
     def __init__(self):
-        """Initialize the recommendation service with the TwoTower model."""
+        """Initialize the recommendation service."""
         self.cursor_tracker = {}
         load_dotenv()
 
@@ -124,36 +124,6 @@ class MLRecommendationService:
         }
         self.content_filter = create_content_filter(filter_config)
         logger.info(f"Initialized content filter with cache size {filter_config['cache_size']}")
-
-        self.two_tower_model = None
-        self._load_model()
-
-    def _load_model(self):
-        """Load the TwoTower model."""
-        try:
-            logger.info("Loading TwoTower model...")
-
-            model_dir = os.environ.get('MODEL_DIR', './model_checkpoints')
-            user_model_path = os.path.join(model_dir, os.environ.get('USER_MODEL', 'user_tower_latest.h5'))
-            post_model_path = os.path.join(model_dir, os.environ.get('POST_MODEL', 'post_tower_latest.h5'))
-
-            self.two_tower_model = TwoTowerModel(
-                user_feature_dim=int(os.environ.get('USER_FEATURE_DIM', '64')),
-                post_feature_dim=int(os.environ.get('POST_FEATURE_DIM', '64')),
-                embedding_dim=int(os.environ.get('EMBEDDING_DIM', '32')),
-                hidden_dims=[int(dim) for dim in os.environ.get('HIDDEN_DIMS', '128,64').split(',')]
-            )
-
-            if os.path.exists(user_model_path) and os.path.exists(post_model_path):
-                self.two_tower_model.load_models(user_model_path, post_model_path)
-                logger.info(f"Loaded pre-trained models from {user_model_path} and {post_model_path}")
-            else:
-                logger.warning("Pre-trained models not found, using initialized model")
-
-            logger.info("TwoTower model loaded successfully")
-        except Exception as e:
-            logger.error(f"Error loading model: {e}")
-            self.two_tower_model = None
 
     def get_recommendations(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -320,7 +290,7 @@ class MLRecommendationService:
     def _score_candidates(self, user_id: str, user_vector: np.ndarray,
                           candidate_data: Dict[str, Any], content_type: str) -> List[tuple]:
         """
-        Score candidate posts using the Two-Tower model with metadata enhancement.
+        Score candidate posts using the vector similarity scoring with metadata enhancement.
 
         Args:
             user_id: User ID
@@ -331,11 +301,6 @@ class MLRecommendationService:
         Returns:
             List of (post_id, score) tuples sorted by score descending
         """
-        if not self.two_tower_model:
-            logger.warning("TwoTower model not available, using fallback scoring")
-            post_ids = list(candidate_data["vectors"].keys())
-            return [(post_id, np.random.random()) for post_id in post_ids]
-
         try:
             vectors = candidate_data["vectors"]
             candidates = candidate_data.get("candidates", [])
@@ -351,7 +316,7 @@ class MLRecommendationService:
             # Reshape user vector for batch processing
             user_batch = np.expand_dims(user_vector, axis=0)
 
-            # Calculate base scores using Two-Tower model
+            # Calculate base scores using vector similarity scoring
             base_scores = compute_scores(user_batch, post_vectors_array, content_type)
 
             # Apply metadata enhancement
@@ -413,7 +378,7 @@ class MLRecommendationService:
                     "message": "No candidates found"
                 }
 
-            # Score candidates using Two-Tower model with metadata enhancement
+            # Score candidates using vector similarity scoring with metadata enhancement
             scored_posts = self._score_candidates(
                 user_id=user_id,
                 user_vector=user_vector,
@@ -480,7 +445,7 @@ class MLRecommendationService:
                     "message": "No trailer candidates found"
                 }
 
-            # Score candidates using Two-Tower model with metadata enhancement
+            # Score candidates using vector similarity scoring with metadata enhancement
             scored_posts = self._score_candidates(
                 user_id=user_id,
                 user_vector=user_vector,
@@ -1024,7 +989,7 @@ def health_check():
         filter_stats = ml_service.get_filter_stats()
         return jsonify({
             "status": "healthy",
-            "modelLoaded": ml_service.two_tower_model is not None,
+            "modelLoaded": True,
             "cacheStatus": {
                 "redisConnected": ml_service.redis_client.ping()
             },

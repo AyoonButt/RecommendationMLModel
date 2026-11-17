@@ -198,7 +198,7 @@ class ValueNetwork(nn.Module):
 class RLContextualBandit:
     """
     Contextual bandit implementation for RL-based recommendation optimization.
-    Integrates with existing Two-Tower system to provide real-time action selection.
+    Integrates with existing vector scoring to provide real-time action selection.
     """
     
     def __init__(self, state_dim: int = 147, config: Dict[str, Any] = None):
@@ -324,7 +324,13 @@ class RLContextualBandit:
             Selected action
         """
         # Convert state to tensor
-        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        state_arr = np.asarray(state, dtype=np.float32)
+        if state_arr.shape[0] != self.state_dim:
+            raise ValueError(
+                f"RL select_action dimension mismatch: got {state_arr.shape[0]}, "
+                f"expected {self.state_dim}"
+            )
+        state_tensor = torch.FloatTensor(state_arr).unsqueeze(0).to(self.device)
         
         # Get action probabilities and state value from policy network
         with torch.no_grad():
@@ -338,6 +344,16 @@ class RLContextualBandit:
         
         # Select action using exploration strategy
         selected_action = self.exploration_strategy.select_action(candidate_actions, context)
+        
+        # 2.6: Log propensity for off-policy evaluation (OPE).
+        # The propensity is the probability of selecting this action under
+        # the current policy — needed for inverse-propensity scoring.
+        selected_action.parameters['propensity'] = float(
+            action_probs[0][selected_action.action_id.split('_')[-1]].item()
+            if selected_action.action_id.split('_')[-1].isdigit()
+            else 1.0 / max(len(candidate_actions), 1)
+        )
+        selected_action.parameters['num_candidates'] = len(candidate_actions)
         
         # Log action selection
         logger.debug(f"Selected action {selected_action.action_type} for user {user_id}")
@@ -637,3 +653,72 @@ class RLContextualBandit:
         self.value_optimizer.load_state_dict(checkpoint['value_optimizer_state_dict'])
         
         logger.info(f"Loaded RL models from {filepath}")
+
+    def save_state(self, filepath: str):
+        """Persist full RL state: networks, optimizers, exploration, action stats."""
+        # Serialize exploration strategy state
+        exploration_state = {}
+        if isinstance(self.exploration_strategy, EpsilonGreedyExploration):
+            exploration_state = {
+                'type': 'epsilon_greedy',
+                'epsilon': self.exploration_strategy.epsilon,
+                'step_count': self.exploration_strategy.step_count
+            }
+        elif isinstance(self.exploration_strategy, ThompsonSamplingExploration):
+            exploration_state = {
+                'type': 'thompson_sampling',
+                'action_stats': dict(self.exploration_strategy.action_stats)
+            }
+
+        # Serialize action performance (convert defaultdict to dict)
+        action_perf = {
+            aid: {'rewards': list(p['rewards']), 'counts': p['counts']}
+            for aid, p in self.action_performance.items()
+        }
+
+        torch.save({
+            'policy_net_state_dict': self.policy_net.state_dict(),
+            'value_net_state_dict': self.value_net.state_dict(),
+            'policy_optimizer_state_dict': self.policy_optimizer.state_dict(),
+            'value_optimizer_state_dict': self.value_optimizer.state_dict(),
+            'config': self.config,
+            'exploration_state': exploration_state,
+            'action_performance': action_perf,
+            'state_dim': self.state_dim
+        }, filepath)
+        logger.info(f"Saved full RL state to {filepath}")
+
+    def load_state(self, filepath: str):
+        """Restore full RL state: networks, optimizers, exploration, action stats."""
+        import os
+        if not os.path.exists(filepath):
+            logger.warning(f"RL state file not found: {filepath}, starting fresh")
+            return
+
+        checkpoint = torch.load(filepath, map_location=self.device)
+
+        self.policy_net.load_state_dict(checkpoint['policy_net_state_dict'])
+        self.value_net.load_state_dict(checkpoint['value_net_state_dict'])
+        self.policy_optimizer.load_state_dict(checkpoint['policy_optimizer_state_dict'])
+        self.value_optimizer.load_state_dict(checkpoint['value_optimizer_state_dict'])
+
+        # Restore exploration strategy
+        expl = checkpoint.get('exploration_state', {})
+        if expl.get('type') == 'epsilon_greedy':
+            self.exploration_strategy = EpsilonGreedyExploration(
+                epsilon=expl.get('epsilon', 0.1),
+                decay_rate=self.config['exploration']['decay_rate']
+            )
+            self.exploration_strategy.step_count = expl.get('step_count', 0)
+        elif expl.get('type') == 'thompson_sampling':
+            self.exploration_strategy = ThompsonSamplingExploration()
+            self.exploration_strategy.action_stats.update(expl.get('action_stats', {}))
+
+        # Restore action performance
+        for aid, p in checkpoint.get('action_performance', {}).items():
+            self.action_performance[aid] = {
+                'rewards': p.get('rewards', []),
+                'counts': p.get('counts', 0)
+            }
+
+        logger.info(f"Loaded full RL state from {filepath}")

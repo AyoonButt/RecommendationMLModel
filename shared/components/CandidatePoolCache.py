@@ -18,7 +18,7 @@ class CandidatePoolCache:
     model has a richer candidate set to rank without requiring a fresh API
     call on every request.
 
-    TMDB Compliance: only post IDs and Two-Tower vectors are persisted.
+    TMDB Compliance: only post IDs and feature vectors are persisted.
     No TMDB metadata is stored in the pool. EligibilityFilter is applied
     downstream at scoring time using live metadata.
     """

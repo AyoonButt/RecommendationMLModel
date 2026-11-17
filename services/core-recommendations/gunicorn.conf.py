@@ -18,5 +18,5 @@ errorlog  = "-"
 loglevel  = os.environ.get("GUNICORN_LOG_LEVEL", "info")
 
 # NOTE: preload_app is intentionally NOT set — CoreRecommendationsService initializes
-# TensorFlow and Redis connections at module load time. Preloading would share these
-# across forked workers, corrupting file descriptors and TF state.
+# Redis connections at module load time. Preloading would share these across forked
+# workers, corrupting file descriptors.

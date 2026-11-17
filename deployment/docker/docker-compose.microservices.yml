@@ -23,12 +23,7 @@ services:
       - REDIS_SSL=false
       - REDIS_TIMEOUT=10
       - USER_FEATURE_DIM=64
-      - POST_FEATURE_DIM=64
       - EMBEDDING_DIM=32
-      - HIDDEN_DIMS=128,64
-      - MODEL_DIR=/app/model_checkpoints
-      - USER_MODEL=user_tower_latest.h5
-      - POST_MODEL=post_tower_latest.h5
       - POOL_ENABLED=true
       - POOL_TTL=86400
       - RL_ENABLED=true
@@ -44,7 +39,6 @@ services:
       - SERVICE_VERSION=1.0.0
       - SERVICE_AUTH_TOKEN=${SERVICE_AUTH_TOKEN}
     volumes:
-      - ../../model_checkpoints:/app/model_checkpoints
       - ../../logs:/app/logs
     depends_on:
       - redis

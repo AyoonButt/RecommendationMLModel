@@ -99,13 +99,14 @@ class RLRewardEngineer:
                 'watchlist_remove': -0.3
             },
             
-            # Reward shaping weights
+            # Reward shaping weights — base reward must dominate (≥70% of total).
+            # Shaping bonuses are capped at 15% of |base_reward| below.
             'shaping_weights': {
-                'exploration': 0.15,  # Weight for exploration bonus
-                'engagement': 0.20,   # Weight for engagement bonus
-                'diversity': 0.10,    # Weight for diversity bonus
-                'novelty': 0.10,      # Weight for novelty bonus
-                'long_term': 0.25     # Weight for long-term factors
+                'exploration': 0.05,  # Reduced from 0.15
+                'engagement': 0.08,   # Reduced from 0.20
+                'diversity': 0.03,    # Reduced from 0.10
+                'novelty': 0.03,      # Reduced from 0.10
+                'long_term': 0.10     # Reduced from 0.25
             },
             
             # Exploration parameters
@@ -172,14 +173,20 @@ class RLRewardEngineer:
         
         # Combine components with weights
         weights = self.config['shaping_weights']
-        final_reward = (
-            comment_adjusted_reward +  # Use comment-adjusted immediate reward
+        shaping_sum = (
             exploration_bonus * weights['exploration'] +
             engagement_bonus * weights['engagement'] +
             diversity_bonus * weights['diversity'] +
             novelty_bonus * weights['novelty'] +
             long_term_penalty * weights['long_term']
         )
+        # Cap shaping at 15% of |base_reward| so base always dominates (≥70%).
+        # Prevents the agent from farming exploration/diversity/novelty bonuses.
+        base_magnitude = abs(comment_adjusted_reward)
+        shaping_cap = 0.15 * max(base_magnitude, 0.1)  # floor at 0.1 for near-zero base
+        shaping_sum = np.clip(shaping_sum, -shaping_cap, shaping_cap)
+
+        final_reward = comment_adjusted_reward + shaping_sum
         
         # Clip to reasonable range
         final_reward = np.clip(final_reward, -2.0, 2.0)
